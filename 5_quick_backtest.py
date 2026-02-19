@@ -18,9 +18,9 @@ FREQ = "Q_END"   # "M_END" / "Q_END" / "Y_END"
 SCOPES_FOR_ALL = ["KOSPI"]
 
 RANK_WINDOW_LIST = [3, 6, 9, 12]
-PICK_MODE = "N"  # "N" or "PCT"
+PICK_MODE = "PCT"  # "N" or "PCT"
 TOP_N_LIST = [10, 20, 30, 40, 50]
-TOP_PCT_LIST = []
+TOP_PCT_LIST = [0.1, 0.2, 0.3, 0.4, 0.5]
 
 # Pre-filter (before rank momentum)
 PRE_FILTER_METRIC = "Marcap"  # "Marcap" or "Amount"
@@ -415,7 +415,6 @@ if common_start is not None:
 res = res.sort_values("total_return", ascending=False)
 if common_start is not None:
     print("common_start:", common_start.date())
-print(res.head(20))
 
 # ===== TOP 5 PLOTS =====
 
@@ -454,6 +453,8 @@ for _, row in top5.iterrows():
     eq = eq.sort_index()
     if common_start is not None:
         eq = eq.loc[eq.index >= common_start]
+    if not eq.empty:
+        eq = eq / eq.iloc[0]
     label = f"rw{row['rank_window']}_{row['pick_mode']}"
     eq.plot(label=label)
     all_eq.append(eq)
@@ -472,9 +473,38 @@ if all_eq:
 
     kospi_eq = equity_from_price(bm_px["KOSPI"], init_cash=eq_ref.iloc[0])
     kosdaq_eq = equity_from_price(bm_px["KOSDAQ"], init_cash=eq_ref.iloc[0])
+    if not kospi_eq.empty:
+        kospi_eq = kospi_eq / kospi_eq.iloc[0]
+    if not kosdaq_eq.empty:
+        kosdaq_eq = kosdaq_eq / kosdaq_eq.iloc[0]
 
     kospi_eq.plot(label="KOSPI")
     kosdaq_eq.plot(label="KOSDAQ")
+
+    # Add benchmark metrics on common_start period
+    if common_start is not None:
+        kospi_eq_m = kospi_eq.loc[kospi_eq.index >= common_start]
+    else:
+        kospi_eq_m = kospi_eq
+    bm_metrics = metrics_from_equity(kospi_eq_m)
+    bench_row = {
+        "weight_mode": "BENCH",
+        "rank_window": "KOSPI",
+        "pick_mode": "",
+        "top_n": np.nan,
+        "top_pct": np.nan,
+        "pre_mode": "",
+        "pre_top_n": np.nan,
+        "pre_top_pct": np.nan,
+        "total_return": bm_metrics["total_return"],
+        "sharpe": bm_metrics["sharpe"],
+        "calmar": bm_metrics["calmar"],
+        "max_drawdown": bm_metrics["max_drawdown"],
+    }
+    res = pd.concat([res, pd.DataFrame([bench_row])], ignore_index=True)
+    res = res.sort_values("total_return", ascending=False)
+
+print(res.head(20))
 
 plt.grid(True)
 plt.legend()
