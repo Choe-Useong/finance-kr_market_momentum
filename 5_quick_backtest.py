@@ -17,15 +17,15 @@ RAW_CLOSE_FILE = "raw_close.parquet"
 FREQ = "Q_END"   # "M_END" / "Q_END" / "Y_END"
 SCOPES_FOR_ALL = ["KOSPI"]
 
-RANK_WINDOW_LIST = [3, 6, 12]
-PICK_MODE = "PCT"  # "N" or "PCT"
-TOP_N_LIST = [10, 20]
-TOP_PCT_LIST = [0.05, 0.10, 0.20, 0.4]
+RANK_WINDOW_LIST = [3, 6, 9, 12]
+PICK_MODE = "N"  # "N" or "PCT"
+TOP_N_LIST = [10, 20, 30, 40, 50]
+TOP_PCT_LIST = []
 
 # Pre-filter (before rank momentum)
 PRE_FILTER_METRIC = "Marcap"  # "Marcap" or "Amount"
-PRE_FILTER_MODE = "PCT"  # "N" or "PCT"
-PRE_TOP_N_LIST = []
+PRE_FILTER_MODE = "N"  # "N" or "PCT"
+PRE_TOP_N_LIST = [50, 100, 200, 400]
 PRE_TOP_PCT_LIST = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9] # [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
 # Optional: define explicit ranges as pairs and expand to list
 PRE_TOP_N_PAIRS = []  # e.g. [(50, 150), (200, 400)]
@@ -35,9 +35,19 @@ FEES = 0.00025
 INIT_CASH = 1.0
 
 # Weighting
-WEIGHT_MODE_LIST = ["EQUAL", "RP"]  # "EQUAL" or "RP"
+WEIGHT_MODE_LIST = ["EQUAL"]  # "EQUAL" or "RP"
 RP_WINDOW = 120  # trading days for covariance
 RP_MIN_PERIODS = 60
+
+# Market timing
+TIMING_ENABLED = True
+TIMING_TICKER = "069500.KS"
+TIMING_SHORT_MA = 25*2
+TIMING_LONG_MA = 25*10
+TIMING_Z_WINDOW = TIMING_LONG_MA
+TIMING_Z_MODE = "STD"  # "STD" or "MAD"
+TIMING_K = 1.0
+TIMING_BUFFER_DAYS = 60
 
 # ===== FUNCTIONS =====
 
@@ -99,6 +109,52 @@ def risk_parity_weights(ret: pd.DataFrame, max_iter: int = 200, tol: float = 1e-
         w = np.clip(w, 1e-8, None)
         w = w / w.sum()
     return pd.Series(w, index=ret.columns)
+
+def download_timing_price(start: pd.Timestamp, end: pd.Timestamp) -> pd.Series:
+    df = yf.download(
+        tickers=TIMING_TICKER,
+        start=start.strftime("%Y-%m-%d"),
+        end=(end + pd.Timedelta(days=1)).strftime("%Y-%m-%d"),
+        auto_adjust=True,
+        progress=False,
+    )
+    if df is None or df.empty:
+        raise ValueError(f"Timing price download failed: {TIMING_TICKER}")
+    px = df["Close"].copy()
+    if isinstance(px, pd.DataFrame):
+        if px.shape[1] == 1:
+            px = px.iloc[:, 0]
+        else:
+            px = px.iloc[:, 0]
+    px.index = pd.to_datetime(px.index).normalize()
+    px = px.sort_index()
+    return px
+
+
+def build_timing_series(min_rebal: pd.Timestamp, max_rebal: pd.Timestamp) -> pd.Series:
+    lookback = TIMING_LONG_MA + TIMING_Z_WINDOW + TIMING_BUFFER_DAYS
+    start = pd.Timestamp(min_rebal) - pd.tseries.offsets.BDay(lookback)
+    end = pd.Timestamp(max_rebal)
+
+    px = download_timing_price(start, end)
+    ma_s = px.rolling(TIMING_SHORT_MA, min_periods=TIMING_SHORT_MA).mean()
+    ma_l = px.rolling(TIMING_LONG_MA, min_periods=TIMING_LONG_MA).mean()
+    ratio = (ma_s - ma_l) / ma_l
+
+    if TIMING_Z_MODE == "STD":
+        mu = ratio.rolling(TIMING_Z_WINDOW, min_periods=TIMING_Z_WINDOW).mean()
+        sigma = ratio.rolling(TIMING_Z_WINDOW, min_periods=TIMING_Z_WINDOW).std(ddof=0)
+        z = (ratio - mu) / sigma.replace(0, np.nan)
+    elif TIMING_Z_MODE == "MAD":
+        med = ratio.rolling(TIMING_Z_WINDOW, min_periods=TIMING_Z_WINDOW).median()
+        mad = (ratio - med).abs().rolling(TIMING_Z_WINDOW, min_periods=TIMING_Z_WINDOW).median()
+        z = (ratio - med) / (1.4826 * mad.replace(0, np.nan))
+    else:
+        raise ValueError(f"Unknown TIMING_Z_MODE: {TIMING_Z_MODE}")
+
+    z = z.replace([np.inf, -np.inf], np.nan)
+    timing = 1.0 / (1.0 + np.exp(-TIMING_K * z))
+    return timing
 
 
 def build_weights(u: pd.DataFrame, rm: pd.DataFrame, rebal_dates: pd.DatetimeIndex,
@@ -243,6 +299,10 @@ close = pd.read_parquet(RAW_CLOSE_FILE)
 close.index = pd.to_datetime(close.index).normalize()
 close.columns = [str(c).zfill(6) for c in close.columns]
 
+timing_series = None
+if TIMING_ENABLED:
+    timing_series = build_timing_series(rebal_dates.min(), rebal_dates.max())
+
 close_m = close.resample("M").last()
 ret_m = np.log(close_m).diff()
 
@@ -294,15 +354,15 @@ for weight_mode in WEIGHT_MODE_LIST:
                         )
                         if w_m.empty:
                             continue
+                        if TIMING_ENABLED:
+                            timing_rebal = timing_series.reindex(w_m.index)
+                            valid = timing_rebal.notna()
+                            w_m = w_m.loc[valid]
+                            timing_rebal = timing_rebal.loc[valid]
+                            w_m = w_m.mul(timing_rebal, axis=0)
+                            if w_m.empty:
+                                continue
                         pf = run_backtest(close, w_m)
-
-                        total_return = float(pf.total_return())
-                        sharpe = float(pf.sharpe_ratio())
-                        max_dd = float(pf.max_drawdown())
-                        cagr = float(pf.annualized_return())
-                        calmar = np.nan
-                        if max_dd != 0:
-                            calmar = cagr / abs(max_dd)
 
                         key = (weight_mode, rank_window, PICK_MODE, top_n, top_pct, PRE_FILTER_MODE, pre_top_n, pre_top_pct)
                         portfolios[key] = pf
@@ -315,13 +375,20 @@ for weight_mode in WEIGHT_MODE_LIST:
                             "pre_mode": PRE_FILTER_MODE,
                             "pre_top_n": pre_top_n,
                             "pre_top_pct": pre_top_pct,
-                            "total_return": total_return,
-                            "sharpe": sharpe,
-                            "calmar": calmar,
-                            "max_drawdown": max_dd,
+                            "total_return": np.nan,
+                            "sharpe": np.nan,
+                            "calmar": np.nan,
+                            "max_drawdown": np.nan,
                         })
 
-res = pd.DataFrame(results)
+res = pd.DataFrame(
+    results,
+    columns=[
+        "weight_mode", "rank_window", "pick_mode", "top_n", "top_pct",
+        "pre_mode", "pre_top_n", "pre_top_pct",
+        "total_return", "sharpe", "calmar", "max_drawdown",
+    ],
+)
 # Align to common start date for fair comparison
 if portfolios:
     common_start = max(pf.value().index.min() for pf in portfolios.values())
