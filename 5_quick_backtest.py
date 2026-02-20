@@ -14,12 +14,12 @@ plt.rcParams["axes.unicode_minus"] = False
 UNIVERSE_FILE = "build_universe.parquet"
 RAW_CLOSE_FILE = "raw_close.parquet"
 
-FREQ = "Q_END"   # "M_END" / "Q_END" / "Y_END"
+FREQ = "Q_END"   # "M_END" / "Q_END" / "H_END" / "Y_END"
 SCOPES_FOR_ALL = ["KOSPI"]
 
 RANK_WINDOW_LIST = [3, 6, 9, 12]
-PICK_MODE = "PCT"  # "N" or "PCT"
-TOP_N_LIST = [10, 20, 30, 40, 50]
+PICK_MODE = "N"  # "N" or "PCT"
+TOP_N_LIST = [5, 10, 20, 40, 50]
 TOP_PCT_LIST = [0.1, 0.2, 0.3, 0.4, 0.5]
 
 # Pre-filter (before rank momentum)
@@ -40,7 +40,7 @@ RP_WINDOW = 120  # trading days for covariance
 RP_MIN_PERIODS = 60
 
 # Market timing
-TIMING_ENABLED = True
+TIMING_ENABLED = False
 TIMING_TICKER = "069500.KS"
 TIMING_SHORT_MA = 25*2
 TIMING_LONG_MA = 25*10
@@ -58,6 +58,8 @@ def pick_rebal_dates(dates: pd.DatetimeIndex, freq: str) -> pd.DatetimeIndex:
         return pd.DatetimeIndex(s.groupby(s.index.to_period("M")).max().values)
     if freq == "Q_END":
         return pd.DatetimeIndex(s.groupby(s.index.to_period("Q")).max().values)
+    if freq == "H_END":
+        return pd.DatetimeIndex(s.groupby(s.index.to_period("2Q")).max().values)
     if freq == "Y_END":
         return pd.DatetimeIndex(s.groupby(s.index.to_period("Y")).max().values)
     raise ValueError(freq)
@@ -303,12 +305,13 @@ timing_series = None
 if TIMING_ENABLED:
     timing_series = build_timing_series(rebal_dates.min(), rebal_dates.max())
 
-close_m = close.resample("M").last()
-ret_m = np.log(close_m).diff()
+# Daily rank -> monthly average (Chen et al.)
+ret_d = np.log(close).diff()
+rank_d = ret_d.rank(axis=1, ascending=True, method="min")
+count_d = ret_d.notna().sum(axis=1)
+rank_norm_d = (rank_d.sub(1, axis=0)).div((count_d - 1).replace(0, np.nan), axis=0)
 
-rank_m = ret_m.rank(axis=1, ascending=True, method="min")
-count_m = ret_m.notna().sum(axis=1)
-rank_norm = (rank_m.sub(1, axis=0)).div((count_m - 1).replace(0, np.nan), axis=0)
+rank_m = rank_norm_d.resample("M").mean()
 
 # ===== GRID SEARCH =====
 
@@ -341,7 +344,7 @@ else:
 
 for weight_mode in WEIGHT_MODE_LIST:
     for rank_window in RANK_WINDOW_LIST:
-        rm = rank_norm.rolling(rank_window, min_periods=rank_window).mean()
+        rm = rank_m.rolling(rank_window, min_periods=rank_window).sum()
         for top_n in pick_top_n_list:
             for top_pct in pick_top_pct_list:
                 for pre_top_n in pre_top_n_list:
