@@ -1,0 +1,336 @@
+﻿import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import os
+from pathlib import Path
+
+from bt_core import (
+    pick_rebal_dates,
+    run_backtest,
+    metrics_from_equity,
+    build_timing_series,
+    download_benchmark,
+    equity_from_price,
+    add_amount_avg,
+    daily_rank_to_monthly,
+    build_weights,
+    momentum_12_1_log,
+)
+
+os.chdir(Path(__file__).resolve().parent)
+plt.rcParams["font.family"] = "Malgun Gothic"
+plt.rcParams["axes.unicode_minus"] = False
+
+# ===== CONFIG =====
+UNIVERSE_FILE = "build_universe.parquet"
+RAW_CLOSE_FILE = "raw_close.parquet"
+
+FREQ = "Q_END"   # "M_END" / "Q_END" / "H_END" / "Y_END"
+SCOPES_FOR_ALL = ["KOSPI", "KOSDAQ", "KOSDAQ GLOBAL"]
+
+RANK_WINDOW_LIST = [3, 6, 9, 12]
+PICK_MODE = "N"  # "N" or "PCT"
+TOP_N_LIST = [10, 20, 40, 50]
+TOP_PCT_LIST = [0.1, 0.2, 0.3, 0.4, 0.5]
+
+# Momentum mode
+MOMENTUM_MODE = "RANK_DAILY"  # "RANK_DAILY" or "MOM_12_1_LOG"
+MOM_12M = 12
+MOM_SKIP_1M = 1
+
+# Pre-filter (before rank momentum)
+PRE_FILTER_METRIC = "Marcap"  # "Marcap" or "Amount"
+PRE_FILTER_MODE = "N"  # "N" or "PCT"
+PRE_TOP_N_LIST = [100, 200, 400, 600]
+PRE_TOP_PCT_LIST = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
+# Optional: define explicit ranges as pairs and expand to list
+PRE_TOP_N_PAIRS = [(1,100), (1, 200), (1, 400), (1, 600)]  # e.g. [(50, 150), (200, 400)]
+PRE_TOP_PCT_PAIRS = [(0, 0.1), (0.1, 0.3), (0.3, 0.5), (0.5, 0.7), (0.7, 1.0)]  # e.g. [(0, 0.1), (0.1, 0.3), (0.3, 0.5), (0.5, 0.7), (0.7, 1.0)]
+
+# Secondary pre-filter (AND/OR)
+PRE_FILTER_COMBINE = "AND"  # "AND", "OR", or "SINGLE"
+PRE_FILTER_METRIC_2 = "AmountAvg"  # secondary metric when combine != SINGLE
+PRE_FILTER_MODE_2 = "PCT"  # "N" or "PCT"
+PRE_TOP_N_2 = 100
+PRE_TOP_PCT_2 = 0.8
+PRE_TOP_PCT_RANGE_2 = None  # e.g. (0.1, 0.3) when PRE_FILTER_MODE_2 == "PCT"
+AMOUNT_AVG_WINDOW = 25 * 3
+AMOUNT_AVG_MIN_PERIODS = 1
+
+FEES = 0.00025
+INIT_CASH = 1.0
+
+# Weighting
+WEIGHT_MODE_LIST = ["EQUAL"]  # "EQUAL" or "RP"
+RP_WINDOW = 120  # trading days for covariance
+RP_MIN_PERIODS = 60
+
+# Market timing
+TIMING_ENABLED = False
+TIMING_TICKER = "069500.KS"
+TIMING_SHORT_MA = 25 * 2
+TIMING_LONG_MA = 25 * 10
+TIMING_Z_WINDOW = TIMING_LONG_MA
+TIMING_Z_MODE = "STD"  # "STD" or "MAD"
+TIMING_K = 1.0
+TIMING_BUFFER_DAYS = 60
+
+
+
+
+# ===== LOAD DATA =====
+
+u = pd.read_parquet(UNIVERSE_FILE)
+u["Date"] = pd.to_datetime(u["Date"]).dt.normalize()
+u["Code"] = u["Code"].astype(str).str.zfill(6)
+if "Amount" in u.columns:
+    u = add_amount_avg(u, AMOUNT_AVG_WINDOW, AMOUNT_AVG_MIN_PERIODS)
+
+u = u[u["Scope"].isin(SCOPES_FOR_ALL)].copy()
+if "Marcap" in u.columns:
+    u = u.sort_values(["Date", "Marcap"], ascending=[True, False])
+    u = u.drop_duplicates(subset=["Date", "Code"], keep="first")
+
+if PRE_FILTER_METRIC not in u.columns:
+    raise ValueError(f"PRE_FILTER_METRIC not in universe: {PRE_FILTER_METRIC}")
+
+all_dates = pd.DatetimeIndex(sorted(u["Date"].unique()))
+rebal_dates = pick_rebal_dates(all_dates, FREQ)
+
+close = pd.read_parquet(RAW_CLOSE_FILE)
+close.index = pd.to_datetime(close.index).normalize()
+close.columns = [str(c).zfill(6) for c in close.columns]
+
+timing_series = None
+if TIMING_ENABLED:
+    timing_series = build_timing_series(
+        TIMING_TICKER,
+        rebal_dates.min(),
+        rebal_dates.max(),
+        TIMING_SHORT_MA,
+        TIMING_LONG_MA,
+        TIMING_Z_WINDOW,
+        z_mode=TIMING_Z_MODE,
+        k=TIMING_K,
+        buffer_days=TIMING_BUFFER_DAYS,
+    )
+
+if MOMENTUM_MODE == "RANK_DAILY":
+    signal_m = daily_rank_to_monthly(close)
+elif MOMENTUM_MODE == "MOM_12_1_LOG":
+    signal_m = momentum_12_1_log(close, m=MOM_12M, skip=MOM_SKIP_1M)
+else:
+    raise ValueError(f"Unknown MOMENTUM_MODE: {MOMENTUM_MODE}")
+
+# ===== GRID SEARCH =====
+
+results = []
+portfolios = {}
+
+if PICK_MODE == "N":
+    pick_top_n_list = TOP_N_LIST
+    pick_top_pct_list = [None]
+elif PICK_MODE == "PCT":
+    pick_top_n_list = [None]
+    pick_top_pct_list = TOP_PCT_LIST
+else:
+    raise ValueError(f"Unknown PICK_MODE: {PICK_MODE}")
+
+if PRE_FILTER_MODE == "N":
+    if PRE_TOP_N_PAIRS:
+        pre_top_n_list = [None]
+        pre_top_n_range_list = PRE_TOP_N_PAIRS
+    else:
+        pre_top_n_list = PRE_TOP_N_LIST
+        pre_top_n_range_list = [None]
+    pre_top_pct_list = [None]
+elif PRE_FILTER_MODE == "PCT":
+    pre_top_n_list = [None]
+    pre_top_n_range_list = [None]
+    if PRE_TOP_PCT_PAIRS:
+        pre_top_pct_list = PRE_TOP_PCT_PAIRS
+    else:
+        pre_top_pct_list = PRE_TOP_PCT_LIST
+else:
+    raise ValueError(f"Unknown PRE_FILTER_MODE: {PRE_FILTER_MODE}")
+
+rank_window_list = RANK_WINDOW_LIST if MOMENTUM_MODE == "RANK_DAILY" else [MOM_12M]
+
+for weight_mode in WEIGHT_MODE_LIST:
+    for rank_window in rank_window_list:
+        if MOMENTUM_MODE == "RANK_DAILY":
+            rm = signal_m.rolling(rank_window, min_periods=rank_window).sum()
+        else:
+            rm = signal_m
+        for top_n in pick_top_n_list:
+            for top_pct in pick_top_pct_list:
+                for pre_top_n in pre_top_n_list:
+                    for pre_top_pct in pre_top_pct_list:
+                        for pre_top_n_range in pre_top_n_range_list:
+                            w_m = build_weights(
+                                u, rm, rebal_dates,
+                                rank_window, PICK_MODE, top_n or 0, top_pct or 0.0,
+                                PRE_FILTER_MODE, pre_top_n or 0, pre_top_pct or 0.0,
+                                weight_mode,
+                                pre_combine=PRE_FILTER_COMBINE,
+                            pre_metric_2=PRE_FILTER_METRIC_2,
+                            pre_mode_2=PRE_FILTER_MODE_2,
+                            pre_top_n_2=PRE_TOP_N_2,
+                            pre_top_pct_2=PRE_TOP_PCT_2,
+                                pre_top_pct_range_2=PRE_TOP_PCT_RANGE_2,
+                                pre_top_n_range=pre_top_n_range,
+                            )
+                            if w_m.empty:
+                                continue
+                            if TIMING_ENABLED:
+                                timing_rebal = timing_series.reindex(w_m.index)
+                                valid = timing_rebal.notna()
+                                w_m = w_m.loc[valid]
+                                timing_rebal = timing_rebal.loc[valid]
+                                w_m = w_m.mul(timing_rebal, axis=0)
+                                if w_m.empty:
+                                    continue
+                            pf = run_backtest(close, w_m, fees=FEES, init_cash=INIT_CASH)
+
+                            record_pre_top_n = pre_top_n_range if pre_top_n_range is not None else pre_top_n
+                            key = (
+                                weight_mode,
+                                rank_window,
+                                PICK_MODE,
+                                top_n,
+                                top_pct,
+                                PRE_FILTER_MODE,
+                                record_pre_top_n,
+                                pre_top_pct,
+                            )
+                            portfolios[key] = pf
+                            results.append({
+                                "weight_mode": weight_mode,
+                                "rank_window": rank_window,
+                                "pick_mode": PICK_MODE,
+                                "top_n": top_n,
+                                "top_pct": top_pct,
+                                "pre_mode": PRE_FILTER_MODE,
+                                "pre_top_n": record_pre_top_n,
+                                "pre_top_pct": pre_top_pct,
+                                "total_return": np.nan,
+                                "sharpe": np.nan,
+                                "cagr": np.nan,
+                                "calmar": np.nan,
+                                "max_drawdown": np.nan,
+                                "rolling_12m_return_std": np.nan,
+                            })
+
+res = pd.DataFrame(
+    results,
+    columns=[
+        "weight_mode", "rank_window", "pick_mode", "top_n", "top_pct",
+        "pre_mode", "pre_top_n", "pre_top_pct",
+        "total_return", "sharpe", "cagr", "calmar", "max_drawdown", "rolling_12m_return_std",
+    ],
+)
+# Align to common start date for fair comparison
+if portfolios:
+    common_start = max(pf.value().index.min() for pf in portfolios.values())
+else:
+    common_start = None
+
+if common_start is not None:
+    for i, row in res.iterrows():
+        key = (
+            row["weight_mode"], row["rank_window"], row["pick_mode"], row["top_n"], row["top_pct"],
+            row["pre_mode"], row["pre_top_n"], row["pre_top_pct"],
+        )
+        pf = portfolios[key]
+        eq = pf.value().copy()
+        eq.index = pd.to_datetime(eq.index).normalize()
+        eq = eq.sort_index()
+        eq = eq.loc[eq.index >= common_start]
+        m = metrics_from_equity(eq)
+        res.loc[i, "total_return"] = m["total_return"]
+        res.loc[i, "sharpe"] = m["sharpe"]
+        res.loc[i, "cagr"] = m["cagr"]
+        res.loc[i, "calmar"] = m["calmar"]
+        res.loc[i, "max_drawdown"] = m["max_drawdown"]
+        res.loc[i, "rolling_12m_return_std"] = m["rolling_12m_return_std"]
+
+res = res.sort_values("total_return", ascending=False)
+if common_start is not None:
+    print("common_start:", common_start.date())
+
+# ===== TOP 5 PLOTS =====
+
+top5 = res.head(5)
+
+BM_TICKERS = ["069500.KS", "229200.KS"]
+
+plt.figure()
+
+all_eq = []
+for _, row in top5.iterrows():
+    key = (
+        row["weight_mode"], row["rank_window"], row["pick_mode"], row["top_n"], row["top_pct"],
+        row["pre_mode"], row["pre_top_n"], row["pre_top_pct"],
+    )
+    pf = portfolios[key]
+    eq = pf.value().copy()
+    eq.index = pd.to_datetime(eq.index).normalize()
+    eq = eq.sort_index()
+    if common_start is not None:
+        eq = eq.loc[eq.index >= common_start]
+    if not eq.empty:
+        eq = eq / eq.iloc[0]
+    label = f"rw{row['rank_window']}_{row['pick_mode']}"
+    eq.plot(label=label)
+    all_eq.append(eq)
+
+if all_eq:
+    eq_ref = all_eq[0]
+    start = eq_ref.index.min().strftime("%Y-%m-%d")
+    end = (eq_ref.index.max() + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+
+    bm_px = download_benchmark(start, end, BM_TICKERS)
+    bm_px = bm_px.reindex(eq_ref.index).ffill()
+    bm_px = bm_px.rename(columns={"069500.KS": "KOSPI", "229200.KS": "KOSDAQ"})
+
+    kospi_eq = equity_from_price(bm_px["KOSPI"], init_cash=eq_ref.iloc[0])
+    kosdaq_eq = equity_from_price(bm_px["KOSDAQ"], init_cash=eq_ref.iloc[0])
+    if not kospi_eq.empty:
+        kospi_eq = kospi_eq / kospi_eq.iloc[0]
+    if not kosdaq_eq.empty:
+        kosdaq_eq = kosdaq_eq / kosdaq_eq.iloc[0]
+
+    kospi_eq.plot(label="KOSPI")
+    kosdaq_eq.plot(label="KOSDAQ")
+
+    # Add benchmark metrics on common_start period
+    if common_start is not None:
+        kospi_eq_m = kospi_eq.loc[kospi_eq.index >= common_start]
+    else:
+        kospi_eq_m = kospi_eq
+    bm_metrics = metrics_from_equity(kospi_eq_m)
+    bench_row = {
+        "weight_mode": "BENCH",
+        "rank_window": "KOSPI",
+        "pick_mode": "",
+        "top_n": np.nan,
+        "top_pct": np.nan,
+        "pre_mode": "",
+        "pre_top_n": np.nan,
+        "pre_top_pct": np.nan,
+        "total_return": bm_metrics["total_return"],
+        "sharpe": bm_metrics["sharpe"],
+        "cagr": bm_metrics["cagr"],
+        "calmar": bm_metrics["calmar"],
+        "max_drawdown": bm_metrics["max_drawdown"],
+        "rolling_12m_return_std": bm_metrics["rolling_12m_return_std"],
+    }
+    res = pd.concat([res, pd.DataFrame([bench_row])], ignore_index=True)
+    res = res.sort_values("total_return", ascending=False)
+
+print(res.head(20))
+
+plt.grid(True)
+plt.legend()
+plt.title("Top 5 Strategies vs Benchmarks")
+plt.show()
