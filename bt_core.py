@@ -73,6 +73,17 @@ def add_amount_avg(df: pd.DataFrame, window: int, min_periods: int = 1) -> pd.Da
     return df
 
 
+def add_marcap_avg(df: pd.DataFrame, window: int, min_periods: int = 1) -> pd.DataFrame:
+    df = df.sort_values(["Code", "Date"]).copy()
+    df["MarcapAvg"] = (
+        df.groupby("Code", sort=False)["Marcap"]
+        .rolling(window=window, min_periods=min_periods)
+        .mean()
+        .reset_index(level=0, drop=True)
+    )
+    return df
+
+
 def daily_rank_to_monthly(close: pd.DataFrame) -> pd.DataFrame:
     ret_d = np.log(close).diff()
     rank_d = ret_d.rank(axis=1, ascending=True, method="min")
@@ -364,6 +375,33 @@ def build_timing_series(
     return timing
 
 
+def apply_timing_weights(
+    w_m: pd.DataFrame,
+    timing_series: pd.Series,
+    mode: str = "SCALE",
+    k: float = 1.0,
+    onoff_z: float = 0.0,
+    min_exposure: float = 0.2,
+) -> pd.DataFrame:
+    if w_m.empty:
+        return w_m
+    if timing_series is None:
+        raise ValueError("timing_series is None")
+    timing_rebal = timing_series.reindex(w_m.index)
+    if mode == "ONOFF":
+        t = timing_rebal.clip(lower=1e-6, upper=1 - 1e-6)
+        z = np.log(t / (1 - t)) / k
+        on = (z > onoff_z).astype(float)
+        timing_rebal = on * (1.0 - min_exposure) + min_exposure
+    elif mode != "SCALE":
+        raise ValueError(f"Unknown TIMING_MODE: {mode}")
+    valid = timing_rebal.notna()
+    w_m = w_m.loc[valid]
+    timing_rebal = timing_rebal.loc[valid]
+    w_m = w_m.mul(timing_rebal, axis=0)
+    return w_m
+
+
 def download_benchmark(start: str, end: str, tickers: list[str]) -> pd.DataFrame:
     df = yf.download(
         tickers=tickers,
@@ -384,3 +422,44 @@ def download_benchmark(start: str, end: str, tickers: list[str]) -> pd.DataFrame
 def equity_from_price(px: pd.Series, init_cash: float = 1.0) -> pd.Series:
     r = px.pct_change().fillna(0.0)
     return init_cash * (1.0 + r).cumprod()
+
+
+def benchmark_equity_for_index(
+    index: pd.Index,
+    ticker: str,
+    init_cash: float = 1.0,
+    name: str | None = None,
+) -> pd.Series:
+    if index is None or len(index) == 0:
+        return pd.Series(dtype=float)
+    idx = pd.to_datetime(index).normalize()
+    idx = pd.DatetimeIndex(idx).sort_values().unique()
+    start = idx.min().strftime("%Y-%m-%d")
+    end = (idx.max() + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+    bm_px = download_benchmark(start, end, [ticker])
+    col = name or ticker
+    if ticker in bm_px.columns:
+        bm_px = bm_px.rename(columns={ticker: col})
+    elif bm_px.columns.size > 0:
+        col = bm_px.columns[0]
+    bm_px = bm_px.reindex(idx).ffill()
+    if bm_px.empty or col not in bm_px.columns:
+        return pd.Series(dtype=float)
+    return equity_from_price(bm_px[col], init_cash=init_cash)
+
+
+def beat_ratio(eq: pd.Series, bm_eq: pd.Series, freq: str = "QE") -> float:
+    eq = eq.dropna()
+    bm_eq = bm_eq.dropna()
+    idx = eq.index.intersection(bm_eq.index)
+    if idx.empty:
+        return np.nan
+    eq = eq.loc[idx]
+    bm_eq = bm_eq.loc[idx]
+
+    eq_r = np.log(eq).resample(freq).last().diff()
+    bm_r = np.log(bm_eq).resample(freq).last().diff()
+    aligned = pd.concat([eq_r, bm_r], axis=1).dropna()
+    if aligned.empty:
+        return np.nan
+    return float((aligned.iloc[:, 0] > aligned.iloc[:, 1]).mean())

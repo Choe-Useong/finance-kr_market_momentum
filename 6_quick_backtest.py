@@ -9,12 +9,16 @@ from bt_core import (
     run_backtest,
     metrics_from_equity,
     build_timing_series,
+    apply_timing_weights,
     download_benchmark,
     equity_from_price,
+    benchmark_equity_for_index,
     add_amount_avg,
+    add_marcap_avg,
     daily_rank_to_monthly,
     build_weights,
     momentum_12_1_log,
+    beat_ratio,
 )
 
 os.chdir(Path(__file__).resolve().parent)
@@ -29,9 +33,9 @@ FREQ = "Q_END"   # "M_END" / "Q_END" / "H_END" / "Y_END"
 SCOPES_FOR_ALL = ["KOSPI", "KOSDAQ", "KOSDAQ GLOBAL"]
 
 RANK_WINDOW_LIST = [3, 6, 9, 12]
-PICK_MODE = "N"  # "N" or "PCT"
+PICK_MODE = "PCT"  # "N" or "PCT"
 TOP_N_LIST = [10, 20, 40, 50]
-TOP_PCT_LIST = [0.1, 0.2, 0.3, 0.4, 0.5]
+TOP_PCT_LIST = [0.1, 0.2, 0.3]
 
 # Momentum mode
 MOMENTUM_MODE = "RANK_DAILY"  # "RANK_DAILY" or "MOM_12_1_LOG"
@@ -39,13 +43,14 @@ MOM_12M = 12
 MOM_SKIP_1M = 1
 
 # Pre-filter (before rank momentum)
-PRE_FILTER_METRIC = "Marcap"  # "Marcap" or "Amount"
-PRE_FILTER_MODE = "N"  # "N" or "PCT"
+PRE_FILTER_METRIC = "MarcapAvg"  # "Marcap" or "Amount" or "MarcapAvg"
+PRE_FILTER_MODE = "PCT"  # "N" or "PCT"
 PRE_TOP_N_LIST = [100, 200, 400, 600]
 PRE_TOP_PCT_LIST = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
+
 # Optional: define explicit ranges as pairs and expand to list
-PRE_TOP_N_PAIRS = [(1,100), (1, 200), (1, 400), (1, 600)]  # e.g. [(50, 150), (200, 400)]
-PRE_TOP_PCT_PAIRS = [(0, 0.1), (0.1, 0.3), (0.3, 0.5), (0.5, 0.7), (0.7, 1.0)]  # e.g. [(0, 0.1), (0.1, 0.3), (0.3, 0.5), (0.5, 0.7), (0.7, 1.0)]
+PRE_TOP_N_PAIRS = [(1,100), (50, 200), (150, 300), (250, 400), (350, 500), (450, 600)]  # e.g. [(50, 150), (200, 400)]
+PRE_TOP_PCT_PAIRS = [(0, 0.2), (0.2, 0.4), (0.4, 0.6), (0.6, 0.8), (0.8, 1.0)]  # e.g. [(0, 0.1), (0.1, 0.3), (0.3, 0.5), (0.5, 0.7), (0.7, 1.0)]
 
 # Secondary pre-filter (AND/OR)
 PRE_FILTER_COMBINE = "AND"  # "AND", "OR", or "SINGLE"
@@ -56,8 +61,10 @@ PRE_TOP_PCT_2 = 0.8
 PRE_TOP_PCT_RANGE_2 = None  # e.g. (0.1, 0.3) when PRE_FILTER_MODE_2 == "PCT"
 AMOUNT_AVG_WINDOW = 25 * 3
 AMOUNT_AVG_MIN_PERIODS = 1
+MARCAP_AVG_WINDOW = 25 * 3
+MARCAP_AVG_MIN_PERIODS = 1
 
-FEES = 0.00025
+FEES = 0.00215
 INIT_CASH = 1.0
 
 # Weighting
@@ -69,11 +76,14 @@ RP_MIN_PERIODS = 60
 TIMING_ENABLED = False
 TIMING_TICKER = "069500.KS"
 TIMING_SHORT_MA = 25 * 2
-TIMING_LONG_MA = 25 * 10
+TIMING_LONG_MA = 25 * 6
 TIMING_Z_WINDOW = TIMING_LONG_MA
 TIMING_Z_MODE = "STD"  # "STD" or "MAD"
 TIMING_K = 1.0
 TIMING_BUFFER_DAYS = 60
+TIMING_MODE = "ONOFF"  # "SCALE" or "ONOFF"
+TIMING_ONOFF_Z = 0.0
+TIMING_MIN_EXPOSURE = 0.0
 
 
 
@@ -85,6 +95,8 @@ u["Date"] = pd.to_datetime(u["Date"]).dt.normalize()
 u["Code"] = u["Code"].astype(str).str.zfill(6)
 if "Amount" in u.columns:
     u = add_amount_avg(u, AMOUNT_AVG_WINDOW, AMOUNT_AVG_MIN_PERIODS)
+if "Marcap" in u.columns:
+    u = add_marcap_avg(u, MARCAP_AVG_WINDOW, MARCAP_AVG_MIN_PERIODS)
 
 u = u[u["Scope"].isin(SCOPES_FOR_ALL)].copy()
 if "Marcap" in u.columns:
@@ -173,21 +185,24 @@ for weight_mode in WEIGHT_MODE_LIST:
                                 PRE_FILTER_MODE, pre_top_n or 0, pre_top_pct or 0.0,
                                 weight_mode,
                                 pre_combine=PRE_FILTER_COMBINE,
-                            pre_metric_2=PRE_FILTER_METRIC_2,
-                            pre_mode_2=PRE_FILTER_MODE_2,
-                            pre_top_n_2=PRE_TOP_N_2,
-                            pre_top_pct_2=PRE_TOP_PCT_2,
+                                pre_metric_2=PRE_FILTER_METRIC_2,
+                                pre_mode_2=PRE_FILTER_MODE_2,
+                                pre_top_n_2=PRE_TOP_N_2,
+                                pre_top_pct_2=PRE_TOP_PCT_2,
                                 pre_top_pct_range_2=PRE_TOP_PCT_RANGE_2,
                                 pre_top_n_range=pre_top_n_range,
                             )
                             if w_m.empty:
                                 continue
                             if TIMING_ENABLED:
-                                timing_rebal = timing_series.reindex(w_m.index)
-                                valid = timing_rebal.notna()
-                                w_m = w_m.loc[valid]
-                                timing_rebal = timing_rebal.loc[valid]
-                                w_m = w_m.mul(timing_rebal, axis=0)
+                                w_m = apply_timing_weights(
+                                    w_m,
+                                    timing_series,
+                                    mode=TIMING_MODE,
+                                    k=TIMING_K,
+                                    onoff_z=TIMING_ONOFF_Z,
+                                    min_exposure=TIMING_MIN_EXPOSURE,
+                                )
                                 if w_m.empty:
                                     continue
                             pf = run_backtest(close, w_m, fees=FEES, init_cash=INIT_CASH)
@@ -235,6 +250,21 @@ if portfolios:
 else:
     common_start = None
 
+bm_eq_full = None
+if common_start is not None and portfolios:
+    any_pf = next(iter(portfolios.values()))
+    eq_any = any_pf.value().copy()
+    eq_any.index = pd.to_datetime(eq_any.index).normalize()
+    eq_any = eq_any.sort_index()
+    eq_any = eq_any.loc[eq_any.index >= common_start]
+    if not eq_any.empty:
+        bm_eq_full = benchmark_equity_for_index(
+            eq_any.index,
+            "069500.KS",
+            init_cash=eq_any.iloc[0],
+            name="KOSPI",
+        )
+
 if common_start is not None:
     for i, row in res.iterrows():
         key = (
@@ -247,12 +277,16 @@ if common_start is not None:
         eq = eq.sort_index()
         eq = eq.loc[eq.index >= common_start]
         m = metrics_from_equity(eq)
+        beat_q = np.nan
+        if bm_eq_full is not None:
+            beat_q = beat_ratio(eq, bm_eq_full, freq="QE")
         res.loc[i, "total_return"] = m["total_return"]
         res.loc[i, "sharpe"] = m["sharpe"]
         res.loc[i, "cagr"] = m["cagr"]
         res.loc[i, "calmar"] = m["calmar"]
         res.loc[i, "max_drawdown"] = m["max_drawdown"]
         res.loc[i, "rolling_12m_return_std"] = m["rolling_12m_return_std"]
+        res.loc[i, "beat_ratio_q"] = beat_q
 
 res = res.sort_values("total_return", ascending=False)
 if common_start is not None:
@@ -261,8 +295,6 @@ if common_start is not None:
 # ===== TOP 5 PLOTS =====
 
 top5 = res.head(5)
-
-BM_TICKERS = ["069500.KS", "229200.KS"]
 
 plt.figure()
 
@@ -286,22 +318,15 @@ for _, row in top5.iterrows():
 
 if all_eq:
     eq_ref = all_eq[0]
-    start = eq_ref.index.min().strftime("%Y-%m-%d")
-    end = (eq_ref.index.max() + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
-
-    bm_px = download_benchmark(start, end, BM_TICKERS)
-    bm_px = bm_px.reindex(eq_ref.index).ffill()
-    bm_px = bm_px.rename(columns={"069500.KS": "KOSPI", "229200.KS": "KOSDAQ"})
-
-    kospi_eq = equity_from_price(bm_px["KOSPI"], init_cash=eq_ref.iloc[0])
-    kosdaq_eq = equity_from_price(bm_px["KOSDAQ"], init_cash=eq_ref.iloc[0])
+    kospi_eq = benchmark_equity_for_index(
+        eq_ref.index,
+        "069500.KS",
+        init_cash=eq_ref.iloc[0],
+        name="KOSPI",
+    )
     if not kospi_eq.empty:
         kospi_eq = kospi_eq / kospi_eq.iloc[0]
-    if not kosdaq_eq.empty:
-        kosdaq_eq = kosdaq_eq / kosdaq_eq.iloc[0]
-
-    kospi_eq.plot(label="KOSPI")
-    kosdaq_eq.plot(label="KOSDAQ")
+        kospi_eq.plot(label="KOSPI")
 
     # Add benchmark metrics on common_start period
     if common_start is not None:
@@ -324,6 +349,7 @@ if all_eq:
         "calmar": bm_metrics["calmar"],
         "max_drawdown": bm_metrics["max_drawdown"],
         "rolling_12m_return_std": bm_metrics["rolling_12m_return_std"],
+        "beat_ratio_q": np.nan,
     }
     res = pd.concat([res, pd.DataFrame([bench_row])], ignore_index=True)
     res = res.sort_values("total_return", ascending=False)
