@@ -382,8 +382,11 @@ def apply_timing_weights(
     k: float = 1.0,
     onoff_z: float = 0.0,
     min_exposure: float = 0.2,
+    return_timing: bool = False,
 ) -> pd.DataFrame:
     if w_m.empty:
+        if return_timing:
+            return w_m, pd.Series(dtype=float)
         return w_m
     if timing_series is None:
         raise ValueError("timing_series is None")
@@ -393,12 +396,17 @@ def apply_timing_weights(
         z = np.log(t / (1 - t)) / k
         on = (z > onoff_z).astype(float)
         timing_rebal = on * (1.0 - min_exposure) + min_exposure
-    elif mode != "SCALE":
+    elif mode == "SCALE":
+        if min_exposure > 0.0:
+            timing_rebal = timing_rebal * (1.0 - min_exposure) + min_exposure
+    else:
         raise ValueError(f"Unknown TIMING_MODE: {mode}")
     valid = timing_rebal.notna()
     w_m = w_m.loc[valid]
     timing_rebal = timing_rebal.loc[valid]
     w_m = w_m.mul(timing_rebal, axis=0)
+    if return_timing:
+        return w_m, timing_rebal
     return w_m
 
 
