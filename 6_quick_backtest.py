@@ -11,7 +11,6 @@ from bt_core import (
     build_timing_series,
     apply_timing_weights,
     download_benchmark,
-    equity_from_price,
     benchmark_equity_for_index,
     add_amount_avg,
     add_marcap_avg,
@@ -35,7 +34,7 @@ SCOPES_FOR_ALL = ["KOSPI", "KOSDAQ", "KOSDAQ GLOBAL"]
 RANK_WINDOW_LIST = [3, 6, 9, 12]
 PICK_MODE = "PCT"  # "N" or "PCT"
 TOP_N_LIST = [10, 20, 40, 50]
-TOP_PCT_LIST = [0.1, 0.2, 0.3]
+TOP_PCT_LIST = [0.05, 0.1, 0.2, 0.3]
 
 # Momentum mode
 MOMENTUM_MODE = "RANK_DAILY"  # "RANK_DAILY" or "MOM_12_1_LOG"
@@ -50,7 +49,7 @@ PRE_TOP_PCT_LIST = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
 
 # Optional: define explicit ranges as pairs and expand to list
 PRE_TOP_N_PAIRS = [(1,100), (50, 200), (150, 300), (250, 400), (350, 500), (450, 600)]  # e.g. [(50, 150), (200, 400)]
-PRE_TOP_PCT_PAIRS = [(0, 0.2), (0.2, 0.4), (0.4, 0.6), (0.6, 0.8), (0.8, 1.0)]  # e.g. [(0, 0.1), (0.1, 0.3), (0.3, 0.5), (0.5, 0.7), (0.7, 1.0)]
+PRE_TOP_PCT_PAIRS = [(0, 0.2), (0.2, 0.4), (0.4, 0.6), (0.6, 0.8), (0.8, 1.0), (0,0.9)]  # e.g. [(0, 0.1), (0.1, 0.3), (0.3, 0.5), (0.5, 0.7), (0.7, 1.0)]
 
 # Secondary pre-filter (AND/OR)
 PRE_FILTER_COMBINE = "AND"  # "AND", "OR", or "SINGLE"
@@ -58,7 +57,7 @@ PRE_FILTER_METRIC_2 = "AmountAvg"  # secondary metric when combine != SINGLE
 PRE_FILTER_MODE_2 = "PCT"  # "N" or "PCT"
 PRE_TOP_N_2 = 100
 PRE_TOP_PCT_2 = 0.8
-PRE_TOP_PCT_RANGE_2 = None  # e.g. (0.1, 0.3) when PRE_FILTER_MODE_2 == "PCT"
+PRE_TOP_PCT_RANGE_2 = (0.1, 0.9)  # e.g. (0.1, 0.3) when PRE_FILTER_MODE_2 == "PCT"
 AMOUNT_AVG_WINDOW = 25 * 3
 AMOUNT_AVG_MIN_PERIODS = 1
 MARCAP_AVG_WINDOW = 25 * 3
@@ -75,15 +74,18 @@ RP_MIN_PERIODS = 60
 # Market timing
 TIMING_ENABLED = False
 TIMING_TICKER = "069500.KS"
-TIMING_SHORT_MA = 25 * 2
-TIMING_LONG_MA = 25 * 6
+TIMING_SHORT_MA = 25 * 6
+TIMING_LONG_MA = 25 * 12
 TIMING_Z_WINDOW = TIMING_LONG_MA
-TIMING_Z_MODE = "STD"  # "STD" or "MAD"
+TIMING_Z_MODE = "MAD"  # "STD" or "MAD"
 TIMING_K = 1.0
 TIMING_BUFFER_DAYS = 60
 TIMING_MODE = "ONOFF"  # "SCALE" or "ONOFF"
 TIMING_ONOFF_Z = 0.0
-TIMING_MIN_EXPOSURE = 0.0
+TIMING_MIN_EXPOSURE = 0.6
+
+# Alternative assets (used when TIMING_ENABLED is True)
+ALT_TICKERS = []  # e.g. ["IEF", "GLD", 138230.KS]
 
 
 
@@ -112,6 +114,23 @@ rebal_dates = pick_rebal_dates(all_dates, FREQ)
 close = pd.read_parquet(RAW_CLOSE_FILE)
 close.index = pd.to_datetime(close.index).normalize()
 close.columns = [str(c).zfill(6) for c in close.columns]
+
+if ALT_TICKERS and not TIMING_ENABLED:
+    raise ValueError("ALT_TICKERS requires TIMING_ENABLED=True")
+
+if ALT_TICKERS:
+    alt_start = close.index.min().strftime("%Y-%m-%d")
+    alt_end = (close.index.max() + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+    alt_px = download_benchmark(alt_start, alt_end, ALT_TICKERS)
+    alt_px = alt_px.reindex(close.index).ffill()
+    alt_px = alt_px.dropna(how="all", axis=1)
+    missing = set(ALT_TICKERS) - set(alt_px.columns)
+    if missing:
+        raise ValueError(f"Missing alt tickers in download: {missing}")
+    overlap = set(close.columns) & set(alt_px.columns)
+    if overlap:
+        raise ValueError(f"ALT_TICKERS overlap with close columns: {overlap}")
+    close = pd.concat([close, alt_px], axis=1)
 
 timing_series = None
 if TIMING_ENABLED:
@@ -195,16 +214,32 @@ for weight_mode in WEIGHT_MODE_LIST:
                             if w_m.empty:
                                 continue
                             if TIMING_ENABLED:
-                                w_m = apply_timing_weights(
+                                w_m, timing_rebal = apply_timing_weights(
                                     w_m,
                                     timing_series,
                                     mode=TIMING_MODE,
                                     k=TIMING_K,
                                     onoff_z=TIMING_ONOFF_Z,
                                     min_exposure=TIMING_MIN_EXPOSURE,
+                                    return_timing=True,
                                 )
                                 if w_m.empty:
                                     continue
+                                if ALT_TICKERS:
+                                    w_alt = 1.0 - timing_rebal
+                                    alt_w = w_alt / len(ALT_TICKERS)
+                                    for t in ALT_TICKERS:
+                                        w_m[t] = alt_w
+                            holdings_cols = [c for c in w_m.columns if c not in ALT_TICKERS]
+                            if holdings_cols:
+                                counts = (w_m[holdings_cols] > 0).sum(axis=1)
+                                hold_avg = float(counts.mean())
+                                hold_min = int(counts.min())
+                                hold_max = int(counts.max())
+                            else:
+                                hold_avg = np.nan
+                                hold_min = np.nan
+                                hold_max = np.nan
                             pf = run_backtest(close, w_m, fees=FEES, init_cash=INIT_CASH)
 
                             record_pre_top_n = pre_top_n_range if pre_top_n_range is not None else pre_top_n
@@ -234,6 +269,9 @@ for weight_mode in WEIGHT_MODE_LIST:
                                 "calmar": np.nan,
                                 "max_drawdown": np.nan,
                                 "rolling_12m_return_std": np.nan,
+                                "hold_avg": hold_avg,
+                                "hold_min": hold_min,
+                                "hold_max": hold_max,
                             })
 
 res = pd.DataFrame(
@@ -242,6 +280,7 @@ res = pd.DataFrame(
         "weight_mode", "rank_window", "pick_mode", "top_n", "top_pct",
         "pre_mode", "pre_top_n", "pre_top_pct",
         "total_return", "sharpe", "cagr", "calmar", "max_drawdown", "rolling_12m_return_std",
+        "hold_avg", "hold_min", "hold_max",
     ],
 )
 # Align to common start date for fair comparison
