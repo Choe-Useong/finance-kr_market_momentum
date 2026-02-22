@@ -3,6 +3,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import os
 from pathlib import Path
+from itertools import product
 
 from bt_core import (
     pick_rebal_dates,
@@ -32,12 +33,13 @@ UNIVERSE_FILE = "build_universe.parquet"
 RAW_CLOSE_FILE = "raw_close.parquet"
 
 FREQ = "Q_END"   # "M_END" / "Q_END" / "H_END" / "Y_END"
-SCOPES_FOR_ALL = ["KOSPI", "KOSDAQ", "KOSDAQ GLOBAL"]
+SCOPES_FOR_ALL = ["KOSPI"]
 
 RANK_WINDOW_LIST = [3, 6, 9, 12]
-PICK_MODE = "PCT"  # "N" or "PCT" (N: top_n, PCT: top_pct; tuple = range)
-TOP_N_LIST = [10, 20, 40, 50]
-TOP_PCT_LIST = [0.05, 0.1, 0.2, (0.05, 0.15), (0.05, 0.1), (0.1, 0.2)]
+RANK_SKIP_M = 2  # 최근 N개월 제외 (rank_window 합에서 빼기)
+PICK_MODE = "N"  # "N" or "PCT" (N: top_n, PCT: top_pct; tuple = range)
+TOP_N_LIST = [10, (3,13)]
+TOP_PCT_LIST = [0.01, 0.02, 0.03, 0.04, 0.05, 0.1]
 
 # Momentum mode
 MOMENTUM_MODE = "RANK_DAILY"  # "RANK_DAILY" / "RANK_WEEKLY" / "MOM_12_1_LOG"
@@ -49,11 +51,11 @@ MOM_SKIP_1M = 1
 PRE_FILTER_METRIC = "MarcapAvg"  # "Marcap" / "Amount" / "MarcapAvg" / "AmountAvg" / "TurnoverAvg" / "AmihudAvg"
 PRE_FILTER_MODE = "PCT"  # "N" or "PCT" (N: top_n, PCT: top_pct; tuple = range)
 PRE_TOP_N_LIST = [100, 200, 400, 600, (1, 100), (50, 200), (150, 300), (250, 400), (350, 500), (450, 600)]
-PRE_TOP_PCT_LIST = [(0, 0.2), (0.2, 0.4), (0.4, 0.6), (0.6, 0.8), (0.8, 1.0), (0, 0.9)]
+PRE_TOP_PCT_LIST = [0.3, 0.6, 0.8, 1]
 
 # Secondary pre-filter (AND/OR)
 PRE_FILTER_COMBINE = "AND"  # "AND" / "OR" / "SINGLE"
-PRE_FILTER_METRIC_2 = "TurnoverAvg"  # when combine != SINGLE: "Marcap"/"Amount"/"MarcapAvg"/"AmountAvg"/"TurnoverAvg"/"AmihudAvg"
+PRE_FILTER_METRIC_2 = "AmountAvg"  # when combine != SINGLE: "Marcap"/"Amount"/"MarcapAvg"/"AmountAvg"/"TurnoverAvg"/"AmihudAvg"
 PRE_FILTER_MODE_2 = "PCT"  # "N" or "PCT" (N: top_n, PCT: top_pct; tuple = range)
 PRE_TOP_N_2 = 100
 PRE_TOP_PCT_2 = 0.8
@@ -65,7 +67,7 @@ FEES = 0.00215
 INIT_CASH = 1.0
 
 # Weighting
-WEIGHT_MODE_LIST = ["RANK"]  # "EQUAL" / "RANK" / "SCORE" / "RP"
+WEIGHT_MODE_LIST = ["EQUAL"]  # "EQUAL" / "RANK" / "SCORE" / "RP"
 RP_WINDOW = 120  # trading days for covariance
 RP_MIN_PERIODS = 60
 
@@ -164,108 +166,112 @@ results = []
 portfolios = {}
 
 if PICK_MODE == "N":
-    pick_top_n_list = TOP_N_LIST
-    pick_top_pct_list = [None]
+    pick_list = [(n, None) for n in TOP_N_LIST]
 elif PICK_MODE == "PCT":
-    pick_top_n_list = [None]
-    pick_top_pct_list = TOP_PCT_LIST
+    pick_list = [(None, p) for p in TOP_PCT_LIST]
 else:
     raise ValueError(f"Unknown PICK_MODE: {PICK_MODE}")
 
 if PRE_FILTER_MODE == "N":
-    pre_top_n_list = PRE_TOP_N_LIST
-    pre_top_pct_list = [None]
+    pre_list = [(n, None) for n in PRE_TOP_N_LIST]
 elif PRE_FILTER_MODE == "PCT":
-    pre_top_n_list = [None]
-    pre_top_pct_list = PRE_TOP_PCT_LIST
+    pre_list = [(None, p) for p in PRE_TOP_PCT_LIST]
 else:
     raise ValueError(f"Unknown PRE_FILTER_MODE: {PRE_FILTER_MODE}")
 
 rank_window_list = RANK_WINDOW_LIST if MOMENTUM_MODE == "RANK_DAILY" else [MOM_12M]
 
-for weight_mode in WEIGHT_MODE_LIST:
-    for rank_window in rank_window_list:
-        if MOMENTUM_MODE == "RANK_DAILY":
-            rm = signal_m.rolling(rank_window, min_periods=rank_window).sum()
+rm_by_rank = {}
+for rank_window in rank_window_list:
+    if MOMENTUM_MODE in ("RANK_DAILY", "RANK_WEEKLY"):
+        if RANK_SKIP_M >= rank_window:
+            continue
+        rm_sum = signal_m.rolling(rank_window, min_periods=rank_window).sum()
+        if RANK_SKIP_M > 0:
+            rm_skip = signal_m.rolling(RANK_SKIP_M, min_periods=RANK_SKIP_M).sum()
+            rm_by_rank[rank_window] = rm_sum - rm_skip
         else:
-            rm = signal_m
-        for top_n in pick_top_n_list:
-            for top_pct in pick_top_pct_list:
-                for pre_top_n in pre_top_n_list:
-                    for pre_top_pct in pre_top_pct_list:
-                        w_m = build_weights(
-                            u, rm, rebal_dates,
-                            rank_window, PICK_MODE, top_n, top_pct,
-                            PRE_FILTER_MODE, pre_top_n or 0, pre_top_pct or 0.0,
-                            weight_mode,
-                            pre_combine=PRE_FILTER_COMBINE,
-                            pre_metric_2=PRE_FILTER_METRIC_2,
-                            pre_mode_2=PRE_FILTER_MODE_2,
-                            pre_top_n_2=PRE_TOP_N_2,
-                            pre_top_pct_2=PRE_TOP_PCT_2,
-                        )
-                        if w_m.empty:
-                            continue
-                        if TIMING_ENABLED:
-                            w_m, timing_rebal = apply_timing_weights(
-                                w_m,
-                                timing_series,
-                                mode=TIMING_MODE,
-                                k=TIMING_K,
-                                onoff_z=TIMING_ONOFF_Z,
-                                min_exposure=TIMING_MIN_EXPOSURE,
-                                return_timing=True,
-                            )
-                            if w_m.empty:
-                                continue
-                            if ALT_TICKERS:
-                                w_alt = 1.0 - timing_rebal
-                                alt_w = w_alt / len(ALT_TICKERS)
-                                for t in ALT_TICKERS:
-                                    w_m[t] = alt_w
-                        holdings_cols = [c for c in w_m.columns if c not in ALT_TICKERS]
-                        if holdings_cols:
-                            counts = (w_m[holdings_cols] > 0).sum(axis=1)
-                            hold_avg = float(counts.mean())
-                            hold_min = int(counts.min())
-                            hold_max = int(counts.max())
-                        else:
-                            hold_avg = np.nan
-                            hold_min = np.nan
-                            hold_max = np.nan
-                        pf = run_backtest(close, w_m, fees=FEES, init_cash=INIT_CASH)
+            rm_by_rank[rank_window] = rm_sum
+    else:
+        rm_by_rank[rank_window] = signal_m
 
-                        record_pre_top_n = pre_top_n
-                        key = (
-                            weight_mode,
-                            rank_window,
-                            PICK_MODE,
-                            top_n,
-                            top_pct,
-                            PRE_FILTER_MODE,
-                            record_pre_top_n,
-                            pre_top_pct,
-                        )
-                        portfolios[key] = pf
-                        results.append({
-                            "weight_mode": weight_mode,
-                            "rank_window": rank_window,
-                            "pick_mode": PICK_MODE,
-                            "top_n": top_n,
-                            "top_pct": top_pct,
-                            "pre_mode": PRE_FILTER_MODE,
-                            "pre_top_n": record_pre_top_n,
-                            "pre_top_pct": pre_top_pct,
-                            "total_return": np.nan,
-                            "sharpe": np.nan,
-                            "cagr": np.nan,
-                            "calmar": np.nan,
-                            "max_drawdown": np.nan,
-                            "rolling_12m_return_std": np.nan,
-                            "hold_avg": hold_avg,
-                            "hold_min": hold_min,
-                            "hold_max": hold_max,
-                        })
+for weight_mode, rank_window, (top_n, top_pct), (pre_top_n, pre_top_pct) in product(
+    WEIGHT_MODE_LIST, rank_window_list, pick_list, pre_list
+):
+    rm = rm_by_rank[rank_window]
+    w_m = build_weights(
+        u, rm, rebal_dates,
+        rank_window, PICK_MODE, top_n, top_pct,
+        PRE_FILTER_MODE, pre_top_n or 0, pre_top_pct or 0.0,
+        weight_mode,
+        pre_combine=PRE_FILTER_COMBINE,
+        pre_metric_2=PRE_FILTER_METRIC_2,
+        pre_mode_2=PRE_FILTER_MODE_2,
+        pre_top_n_2=PRE_TOP_N_2,
+        pre_top_pct_2=PRE_TOP_PCT_2,
+    )
+    if w_m.empty:
+        continue
+    if TIMING_ENABLED:
+        w_m, timing_rebal = apply_timing_weights(
+            w_m,
+            timing_series,
+            mode=TIMING_MODE,
+            k=TIMING_K,
+            onoff_z=TIMING_ONOFF_Z,
+            min_exposure=TIMING_MIN_EXPOSURE,
+            return_timing=True,
+        )
+        if w_m.empty:
+            continue
+        if ALT_TICKERS:
+            w_alt = 1.0 - timing_rebal
+            alt_w = w_alt / len(ALT_TICKERS)
+            for t in ALT_TICKERS:
+                w_m[t] = alt_w
+    holdings_cols = [c for c in w_m.columns if c not in ALT_TICKERS]
+    if holdings_cols:
+        counts = (w_m[holdings_cols] > 0).sum(axis=1)
+        hold_avg = float(counts.mean())
+        hold_min = int(counts.min())
+        hold_max = int(counts.max())
+    else:
+        hold_avg = np.nan
+        hold_min = np.nan
+        hold_max = np.nan
+    pf = run_backtest(close, w_m, fees=FEES, init_cash=INIT_CASH)
+
+    record_pre_top_n = pre_top_n
+    key = (
+        weight_mode,
+        rank_window,
+        PICK_MODE,
+        top_n,
+        top_pct,
+        PRE_FILTER_MODE,
+        record_pre_top_n,
+        pre_top_pct,
+    )
+    portfolios[key] = pf
+    results.append({
+        "weight_mode": weight_mode,
+        "rank_window": rank_window,
+        "pick_mode": PICK_MODE,
+        "top_n": top_n,
+        "top_pct": top_pct,
+        "pre_mode": PRE_FILTER_MODE,
+        "pre_top_n": record_pre_top_n,
+        "pre_top_pct": pre_top_pct,
+        "total_return": np.nan,
+        "sharpe": np.nan,
+        "cagr": np.nan,
+        "calmar": np.nan,
+        "max_drawdown": np.nan,
+        "rolling_12m_return_std": np.nan,
+        "hold_avg": hold_avg,
+        "hold_min": hold_min,
+        "hold_max": hold_max,
+    })
 
 res = pd.DataFrame(
     results,
@@ -389,6 +395,59 @@ if all_eq:
 print(res.head(20))
 
 plt.grid(True)
+plt.yscale("log")
 plt.legend()
 plt.title("Top 5 Strategies vs Benchmarks")
 plt.show()
+
+# ===== LATEST SNAPSHOT (best strategy at latest data date) =====
+if not res.empty:
+    snap_df = res[res["weight_mode"] != "BENCH"]
+    if not snap_df.empty:
+        snap = snap_df.iloc[0]
+        latest_date = pd.to_datetime(u["Date"].max()).normalize()
+        def _coerce_n(v):
+            if pd.isna(v):
+                return None
+            if isinstance(v, tuple):
+                return tuple(int(x) for x in v)
+            return int(v)
+
+        def _coerce_pct(v):
+            if pd.isna(v):
+                return None
+            if isinstance(v, tuple):
+                return tuple(float(x) for x in v)
+            return float(v)
+
+        top_n = _coerce_n(snap["top_n"]) if snap["pick_mode"] == "N" else None
+        top_pct = _coerce_pct(snap["top_pct"]) if snap["pick_mode"] == "PCT" else None
+        pre_top_n = _coerce_n(snap["pre_top_n"]) if snap["pre_mode"] == "N" else 0
+        pre_top_pct = _coerce_pct(snap["pre_top_pct"]) if snap["pre_mode"] == "PCT" else 0.0
+        rank_window = int(snap["rank_window"])
+        rm = rm_by_rank.get(rank_window)
+        if rm is None:
+            print("latest snapshot: missing rm for rank_window", rank_window)
+        else:
+            w_latest = build_weights(
+                u, rm, pd.DatetimeIndex([latest_date]),
+                rank_window, snap["pick_mode"], top_n, top_pct,
+                snap["pre_mode"], pre_top_n, pre_top_pct,
+                snap["weight_mode"],
+                pre_combine=PRE_FILTER_COMBINE,
+                pre_metric_2=PRE_FILTER_METRIC_2,
+                pre_mode_2=PRE_FILTER_MODE_2,
+                pre_top_n_2=PRE_TOP_N_2,
+                pre_top_pct_2=PRE_TOP_PCT_2,
+                close=close,
+                rp_window=RP_WINDOW,
+                rp_min_periods=RP_MIN_PERIODS,
+            )
+            if w_latest.empty or latest_date not in w_latest.index:
+                print("latest snapshot: no holdings at", latest_date.date())
+            else:
+                s = w_latest.loc[latest_date]
+                s = s[s > 0].sort_values(ascending=False)
+                print("latest snapshot date:", latest_date.date())
+                print("codes:", s.index.tolist())
+                print("weights:", [float(x) for x in s.values])
