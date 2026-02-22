@@ -35,48 +35,37 @@ FREQ = "Q_END"   # "M_END" / "Q_END" / "H_END" / "Y_END"
 SCOPES_FOR_ALL = ["KOSPI", "KOSDAQ", "KOSDAQ GLOBAL"]
 
 RANK_WINDOW_LIST = [3, 6, 9, 12]
-PICK_MODE = "PCT"  # "N" or "PCT"
+PICK_MODE = "PCT"  # "N" or "PCT" (N: top_n, PCT: top_pct; tuple = range)
 TOP_N_LIST = [10, 20, 40, 50]
-TOP_PCT_LIST = []
-TOP_PCT_RANGE_LIST = [(0.05, 0.15), (0.05, 0.1), (0, 0.05), (0, 0.1), (0, 0.2)]  # e.g. [(0.1, 0.3), (0.3, 0.5)]
+TOP_PCT_LIST = [0.05, 0.1, 0.2, (0.05, 0.15), (0.05, 0.1), (0.1, 0.2)]
 
 # Momentum mode
-MOMENTUM_MODE = "RANK_DAILY"  # "RANK_DAILY" or "RANK_WEEKLY" or "MOM_12_1_LOG"
+MOMENTUM_MODE = "RANK_DAILY"  # "RANK_DAILY" / "RANK_WEEKLY" / "MOM_12_1_LOG"
 WEEKLY_FREQ = "W-FRI"
 MOM_12M = 12
 MOM_SKIP_1M = 1
 
 # Pre-filter (before rank momentum)
-PRE_FILTER_METRIC = "MarcapAvg"  # "Marcap" or "Amount" or "MarcapAvg"
-PRE_FILTER_MODE = "PCT"  # "N" or "PCT"
-PRE_TOP_N_LIST = [100, 200, 400, 600]
-PRE_TOP_PCT_LIST = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
-
-# Optional: define explicit ranges as pairs and expand to list
-PRE_TOP_N_PAIRS = [(1,100), (50, 200), (150, 300), (250, 400), (350, 500), (450, 600)]  # e.g. [(50, 150), (200, 400)]
-PRE_TOP_PCT_PAIRS = [(0, 0.2), (0.2, 0.4), (0.4, 0.6), (0.6, 0.8), (0.8, 1.0), (0,0.9)]  # e.g. [(0, 0.1), (0.1, 0.3), (0.3, 0.5), (0.5, 0.7), (0.7, 1.0)]
+PRE_FILTER_METRIC = "MarcapAvg"  # "Marcap" / "Amount" / "MarcapAvg" / "AmountAvg" / "TurnoverAvg" / "AmihudAvg"
+PRE_FILTER_MODE = "PCT"  # "N" or "PCT" (N: top_n, PCT: top_pct; tuple = range)
+PRE_TOP_N_LIST = [100, 200, 400, 600, (1, 100), (50, 200), (150, 300), (250, 400), (350, 500), (450, 600)]
+PRE_TOP_PCT_LIST = [(0, 0.2), (0.2, 0.4), (0.4, 0.6), (0.6, 0.8), (0.8, 1.0), (0, 0.9)]
 
 # Secondary pre-filter (AND/OR)
-PRE_FILTER_COMBINE = "AND"  # "AND", "OR", or "SINGLE"
-PRE_FILTER_METRIC_2 = "TurnoverAvg"  # secondary metric when combine != SINGLE TurnoverAvg AmihudAvg
-PRE_FILTER_MODE_2 = "PCT"  # "N" or "PCT"
+PRE_FILTER_COMBINE = "AND"  # "AND" / "OR" / "SINGLE"
+PRE_FILTER_METRIC_2 = "TurnoverAvg"  # when combine != SINGLE: "Marcap"/"Amount"/"MarcapAvg"/"AmountAvg"/"TurnoverAvg"/"AmihudAvg"
+PRE_FILTER_MODE_2 = "PCT"  # "N" or "PCT" (N: top_n, PCT: top_pct; tuple = range)
 PRE_TOP_N_2 = 100
-PRE_TOP_PCT_2 = None
-PRE_TOP_PCT_RANGE_2 = (0.2, 0.8) # e.g. (0.1, 0.3) when PRE_FILTER_MODE_2 == "PCT"
-AMOUNT_AVG_WINDOW = 25 * 3
-AMOUNT_AVG_MIN_PERIODS = 1
-MARCAP_AVG_WINDOW = 25 * 3
-MARCAP_AVG_MIN_PERIODS = 1
-TURNOVER_AVG_WINDOW = 25 * 3
-TURNOVER_AVG_MIN_PERIODS = 1
-AMIHUD_AVG_WINDOW = 25 * 3
-AMIHUD_AVG_MIN_PERIODS = 1
+PRE_TOP_PCT_2 = 0.8
+# Shared metric window (Amount/Marcap/Turnover/Amihud etc.)
+METRIC_AVG_WINDOW = 25 * 3
+METRIC_AVG_MIN_PERIODS = 1
 
 FEES = 0.00215
 INIT_CASH = 1.0
 
 # Weighting
-WEIGHT_MODE_LIST = ["RANK"]  # "EQUAL", "RANK", "SCORE", or "RP"
+WEIGHT_MODE_LIST = ["RANK"]  # "EQUAL" / "RANK" / "SCORE" / "RP"
 RP_WINDOW = 120  # trading days for covariance
 RP_MIN_PERIODS = 60
 
@@ -86,10 +75,10 @@ TIMING_TICKER = "069500.KS"
 TIMING_SHORT_MA = 25 * 6
 TIMING_LONG_MA = 25 * 12
 TIMING_Z_WINDOW = TIMING_LONG_MA
-TIMING_Z_MODE = "MAD"  # "STD" or "MAD"
+TIMING_Z_MODE = "MAD"  # "STD" / "MAD"
 TIMING_K = 1.0
 TIMING_BUFFER_DAYS = 60
-TIMING_MODE = "ONOFF"  # "SCALE" or "ONOFF"
+TIMING_MODE = "ONOFF"  # "SCALE" / "ONOFF"
 TIMING_ONOFF_Z = 0.0
 TIMING_MIN_EXPOSURE = 0.6
 
@@ -105,11 +94,11 @@ u = pd.read_parquet(UNIVERSE_FILE)
 u["Date"] = pd.to_datetime(u["Date"]).dt.normalize()
 u["Code"] = u["Code"].astype(str).str.zfill(6)
 if "Amount" in u.columns:
-    u = add_amount_avg(u, AMOUNT_AVG_WINDOW, AMOUNT_AVG_MIN_PERIODS)
+    u = add_amount_avg(u, METRIC_AVG_WINDOW, METRIC_AVG_MIN_PERIODS)
 if "Marcap" in u.columns:
-    u = add_marcap_avg(u, MARCAP_AVG_WINDOW, MARCAP_AVG_MIN_PERIODS)
+    u = add_marcap_avg(u, METRIC_AVG_WINDOW, METRIC_AVG_MIN_PERIODS)
 if "Amount" in u.columns and "Marcap" in u.columns:
-    u = add_turnover_avg(u, TURNOVER_AVG_WINDOW, TURNOVER_AVG_MIN_PERIODS)
+    u = add_turnover_avg(u, METRIC_AVG_WINDOW, METRIC_AVG_MIN_PERIODS)
 
 u = u[u["Scope"].isin(SCOPES_FOR_ALL)].copy()
 if "Marcap" in u.columns:
@@ -144,7 +133,7 @@ if ALT_TICKERS:
     close = pd.concat([close, alt_px], axis=1)
 
 if "Amount" in u.columns:
-    u = add_amihud_avg(u, close, AMIHUD_AVG_WINDOW, AMIHUD_AVG_MIN_PERIODS)
+    u = add_amihud_avg(u, close, METRIC_AVG_WINDOW, METRIC_AVG_MIN_PERIODS)
 
 timing_series = None
 if TIMING_ENABLED:
@@ -177,33 +166,18 @@ portfolios = {}
 if PICK_MODE == "N":
     pick_top_n_list = TOP_N_LIST
     pick_top_pct_list = [None]
-    pick_top_pct_range_list = [None]
 elif PICK_MODE == "PCT":
     pick_top_n_list = [None]
-    if TOP_PCT_RANGE_LIST:
-        pick_top_pct_list = [None]
-        pick_top_pct_range_list = TOP_PCT_RANGE_LIST
-    else:
-        pick_top_pct_list = TOP_PCT_LIST
-        pick_top_pct_range_list = [None]
+    pick_top_pct_list = TOP_PCT_LIST
 else:
     raise ValueError(f"Unknown PICK_MODE: {PICK_MODE}")
 
 if PRE_FILTER_MODE == "N":
-    if PRE_TOP_N_PAIRS:
-        pre_top_n_list = [None]
-        pre_top_n_range_list = PRE_TOP_N_PAIRS
-    else:
-        pre_top_n_list = PRE_TOP_N_LIST
-        pre_top_n_range_list = [None]
+    pre_top_n_list = PRE_TOP_N_LIST
     pre_top_pct_list = [None]
 elif PRE_FILTER_MODE == "PCT":
     pre_top_n_list = [None]
-    pre_top_n_range_list = [None]
-    if PRE_TOP_PCT_PAIRS:
-        pre_top_pct_list = PRE_TOP_PCT_PAIRS
-    else:
-        pre_top_pct_list = PRE_TOP_PCT_LIST
+    pre_top_pct_list = PRE_TOP_PCT_LIST
 else:
     raise ValueError(f"Unknown PRE_FILTER_MODE: {PRE_FILTER_MODE}")
 
@@ -217,93 +191,86 @@ for weight_mode in WEIGHT_MODE_LIST:
             rm = signal_m
         for top_n in pick_top_n_list:
             for top_pct in pick_top_pct_list:
-                for top_pct_range in pick_top_pct_range_list:
-                    for pre_top_n in pre_top_n_list:
-                        for pre_top_pct in pre_top_pct_list:
-                            for pre_top_n_range in pre_top_n_range_list:
-                                w_m = build_weights(
-                                    u, rm, rebal_dates,
-                                    rank_window, PICK_MODE, top_n or 0, top_pct or 0.0,
-                                    PRE_FILTER_MODE, pre_top_n or 0, pre_top_pct or 0.0,
-                                    weight_mode,
-                                    pre_combine=PRE_FILTER_COMBINE,
-                                    pre_metric_2=PRE_FILTER_METRIC_2,
-                                    pre_mode_2=PRE_FILTER_MODE_2,
-                                    pre_top_n_2=PRE_TOP_N_2,
-                                    pre_top_pct_2=PRE_TOP_PCT_2,
-                                    pre_top_pct_range_2=PRE_TOP_PCT_RANGE_2,
-                                    pre_top_n_range=pre_top_n_range,
-                                    top_pct_range=top_pct_range,
-                                )
+                for pre_top_n in pre_top_n_list:
+                    for pre_top_pct in pre_top_pct_list:
+                        w_m = build_weights(
+                            u, rm, rebal_dates,
+                            rank_window, PICK_MODE, top_n, top_pct,
+                            PRE_FILTER_MODE, pre_top_n or 0, pre_top_pct or 0.0,
+                            weight_mode,
+                            pre_combine=PRE_FILTER_COMBINE,
+                            pre_metric_2=PRE_FILTER_METRIC_2,
+                            pre_mode_2=PRE_FILTER_MODE_2,
+                            pre_top_n_2=PRE_TOP_N_2,
+                            pre_top_pct_2=PRE_TOP_PCT_2,
+                        )
+                        if w_m.empty:
+                            continue
+                        if TIMING_ENABLED:
+                            w_m, timing_rebal = apply_timing_weights(
+                                w_m,
+                                timing_series,
+                                mode=TIMING_MODE,
+                                k=TIMING_K,
+                                onoff_z=TIMING_ONOFF_Z,
+                                min_exposure=TIMING_MIN_EXPOSURE,
+                                return_timing=True,
+                            )
                             if w_m.empty:
                                 continue
-                            if TIMING_ENABLED:
-                                w_m, timing_rebal = apply_timing_weights(
-                                    w_m,
-                                    timing_series,
-                                    mode=TIMING_MODE,
-                                    k=TIMING_K,
-                                    onoff_z=TIMING_ONOFF_Z,
-                                    min_exposure=TIMING_MIN_EXPOSURE,
-                                    return_timing=True,
-                                )
-                                if w_m.empty:
-                                    continue
-                                if ALT_TICKERS:
-                                    w_alt = 1.0 - timing_rebal
-                                    alt_w = w_alt / len(ALT_TICKERS)
-                                    for t in ALT_TICKERS:
-                                        w_m[t] = alt_w
-                            holdings_cols = [c for c in w_m.columns if c not in ALT_TICKERS]
-                            if holdings_cols:
-                                counts = (w_m[holdings_cols] > 0).sum(axis=1)
-                                hold_avg = float(counts.mean())
-                                hold_min = int(counts.min())
-                                hold_max = int(counts.max())
-                            else:
-                                hold_avg = np.nan
-                                hold_min = np.nan
-                                hold_max = np.nan
-                            pf = run_backtest(close, w_m, fees=FEES, init_cash=INIT_CASH)
+                            if ALT_TICKERS:
+                                w_alt = 1.0 - timing_rebal
+                                alt_w = w_alt / len(ALT_TICKERS)
+                                for t in ALT_TICKERS:
+                                    w_m[t] = alt_w
+                        holdings_cols = [c for c in w_m.columns if c not in ALT_TICKERS]
+                        if holdings_cols:
+                            counts = (w_m[holdings_cols] > 0).sum(axis=1)
+                            hold_avg = float(counts.mean())
+                            hold_min = int(counts.min())
+                            hold_max = int(counts.max())
+                        else:
+                            hold_avg = np.nan
+                            hold_min = np.nan
+                            hold_max = np.nan
+                        pf = run_backtest(close, w_m, fees=FEES, init_cash=INIT_CASH)
 
-                            record_pre_top_n = pre_top_n_range if pre_top_n_range is not None else pre_top_n
-                            key = (
-                                weight_mode,
-                                rank_window,
-                                PICK_MODE,
-                                top_n,
-                                top_pct,
-                                top_pct_range,
-                                PRE_FILTER_MODE,
-                                record_pre_top_n,
-                                pre_top_pct,
-                            )
-                            portfolios[key] = pf
-                            results.append({
-                                "weight_mode": weight_mode,
-                                "rank_window": rank_window,
-                                "pick_mode": PICK_MODE,
-                                "top_n": top_n,
-                                "top_pct": top_pct,
-                                "top_pct_range": top_pct_range,
-                                "pre_mode": PRE_FILTER_MODE,
-                                "pre_top_n": record_pre_top_n,
-                                "pre_top_pct": pre_top_pct,
-                                "total_return": np.nan,
-                                "sharpe": np.nan,
-                                "cagr": np.nan,
-                                "calmar": np.nan,
-                                "max_drawdown": np.nan,
-                                "rolling_12m_return_std": np.nan,
-                                "hold_avg": hold_avg,
-                                "hold_min": hold_min,
-                                "hold_max": hold_max,
-                            })
+                        record_pre_top_n = pre_top_n
+                        key = (
+                            weight_mode,
+                            rank_window,
+                            PICK_MODE,
+                            top_n,
+                            top_pct,
+                            PRE_FILTER_MODE,
+                            record_pre_top_n,
+                            pre_top_pct,
+                        )
+                        portfolios[key] = pf
+                        results.append({
+                            "weight_mode": weight_mode,
+                            "rank_window": rank_window,
+                            "pick_mode": PICK_MODE,
+                            "top_n": top_n,
+                            "top_pct": top_pct,
+                            "pre_mode": PRE_FILTER_MODE,
+                            "pre_top_n": record_pre_top_n,
+                            "pre_top_pct": pre_top_pct,
+                            "total_return": np.nan,
+                            "sharpe": np.nan,
+                            "cagr": np.nan,
+                            "calmar": np.nan,
+                            "max_drawdown": np.nan,
+                            "rolling_12m_return_std": np.nan,
+                            "hold_avg": hold_avg,
+                            "hold_min": hold_min,
+                            "hold_max": hold_max,
+                        })
 
 res = pd.DataFrame(
     results,
     columns=[
-        "weight_mode", "rank_window", "pick_mode", "top_n", "top_pct", "top_pct_range",
+        "weight_mode", "rank_window", "pick_mode", "top_n", "top_pct",
         "pre_mode", "pre_top_n", "pre_top_pct",
         "total_return", "sharpe", "cagr", "calmar", "max_drawdown", "rolling_12m_return_std",
         "hold_avg", "hold_min", "hold_max",
@@ -334,7 +301,6 @@ if common_start is not None:
     for i, row in res.iterrows():
         key = (
             row["weight_mode"], row["rank_window"], row["pick_mode"], row["top_n"], row["top_pct"],
-            row["top_pct_range"],
             row["pre_mode"], row["pre_top_n"], row["pre_top_pct"],
         )
         pf = portfolios[key]
@@ -368,7 +334,6 @@ all_eq = []
 for _, row in top5.iterrows():
     key = (
         row["weight_mode"], row["rank_window"], row["pick_mode"], row["top_n"], row["top_pct"],
-        row["top_pct_range"],
         row["pre_mode"], row["pre_top_n"], row["pre_top_pct"],
     )
     pf = portfolios[key]
@@ -407,7 +372,6 @@ if all_eq:
         "pick_mode": "",
         "top_n": np.nan,
         "top_pct": np.nan,
-        "top_pct_range": np.nan,
         "pre_mode": "",
         "pre_top_n": np.nan,
         "pre_top_pct": np.nan,

@@ -200,23 +200,19 @@ def build_weights(
     rebal_dates: pd.DatetimeIndex,
     rank_window: int,
     pick_mode: str,
-    top_n: int,
-    top_pct: float,
+    top_n: int | tuple[int, int],
+    top_pct: float | tuple[float, float],
     pre_mode: str,
-    pre_top_n: int,
-    pre_top_pct: float,
+    pre_top_n: int | tuple[int, int],
+    pre_top_pct: float | tuple[float, float],
     weight_mode: str,
     pre_combine: str = "SINGLE",
     pre_metric_2: str | None = None,
     pre_mode_2: str = "N",
-    pre_top_n_2: int = 0,
-    pre_top_pct_2: float = 0.0,
-    pre_top_pct_range_2: tuple[float, float] | None = None,
-    pre_top_n_range: tuple[int, int] | None = None,
+    pre_top_n_2: int | tuple[int, int] = 0,
+    pre_top_pct_2: float | tuple[float, float] = 0.0,
     close: pd.DataFrame | None = None,
     pre_filter_metric: str = "Marcap",
-    pre_top_pct_range: tuple[float, float] | None = None,
-    top_pct_range: tuple[float, float] | None = None,
     rp_window: int = 120,
     rp_min_periods: int = 60,
 ) -> pd.DataFrame:
@@ -237,10 +233,8 @@ def build_weights(
             continue
 
         s_pre = g.set_index("Code")[pre_filter_metric]
-        if pre_mode == "N" and pre_top_n_range is not None:
-            pre_codes = pick_top_by_n_range(s_pre, pre_top_n_range)
-        elif pre_mode == "PCT" and pre_top_pct_range is not None:
-            pre_codes = pick_top_by_pct_range(s_pre, pre_top_pct_range)
+        if pre_mode == "N" and isinstance(pre_top_n, tuple):
+            pre_codes = pick_top_by_n_range(s_pre, pre_top_n)
         elif pre_mode == "PCT" and isinstance(pre_top_pct, tuple):
             pre_codes = pick_top_by_pct_range(s_pre, pre_top_pct)
         else:
@@ -250,8 +244,10 @@ def build_weights(
             if pre_metric_2 not in g.columns:
                 raise ValueError(f"pre_metric_2 not in universe: {pre_metric_2}")
             s_pre2 = g.set_index("Code")[pre_metric_2]
-            if pre_mode_2 == "PCT" and pre_top_pct_range_2 is not None:
-                pre_codes_2 = pick_top_by_pct_range(s_pre2, pre_top_pct_range_2)
+            if pre_mode_2 == "N" and isinstance(pre_top_n_2, tuple):
+                pre_codes_2 = pick_top_by_n_range(s_pre2, pre_top_n_2)
+            elif pre_mode_2 == "PCT" and isinstance(pre_top_pct_2, tuple):
+                pre_codes_2 = pick_top_by_pct_range(s_pre2, pre_top_pct_2)
             else:
                 pre_codes_2 = pick_top_by_mode(s_pre2, pre_mode_2, pre_top_n_2, pre_top_pct_2)
             pre_codes = combine_prefilter(pre_codes, pre_codes_2, mode=pre_combine)
@@ -263,8 +259,10 @@ def build_weights(
             continue
 
         scores = rm.loc[month_end, codes]
-        if pick_mode == "PCT" and top_pct_range is not None:
-            pick_codes = pick_top_by_pct_range(scores, top_pct_range)
+        if pick_mode == "N" and isinstance(top_n, tuple):
+            pick_codes = pick_top_by_n_range(scores, top_n)
+        elif pick_mode == "PCT" and isinstance(top_pct, tuple):
+            pick_codes = pick_top_by_pct_range(scores, top_pct)
         else:
             pick_codes = pick_top_by_mode(scores, pick_mode, top_n, top_pct)
         if len(pick_codes) == 0:
