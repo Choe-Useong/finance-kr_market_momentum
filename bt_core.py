@@ -84,12 +84,65 @@ def add_marcap_avg(df: pd.DataFrame, window: int, min_periods: int = 1) -> pd.Da
     return df
 
 
+def add_turnover_avg(df: pd.DataFrame, window: int, min_periods: int = 1) -> pd.DataFrame:
+    df = df.sort_values(["Code", "Date"]).copy()
+    ratio = df["Amount"] / df["Marcap"]
+    df["TurnoverAvg"] = (
+        ratio.groupby(df["Code"], sort=False)
+        .rolling(window=window, min_periods=min_periods)
+        .mean()
+        .reset_index(level=0, drop=True)
+    )
+    return df
+
+
+def add_amihud_avg(
+    df: pd.DataFrame,
+    close: pd.DataFrame,
+    window: int,
+    min_periods: int = 1,
+) -> pd.DataFrame:
+    df = df.sort_values(["Code", "Date"]).copy()
+    df["Date"] = pd.to_datetime(df["Date"]).dt.normalize()
+    df["Code"] = df["Code"].astype(str)
+
+    close = close.copy()
+    close.index = pd.to_datetime(close.index).normalize()
+    close.columns = close.columns.astype(str)
+    ret = np.log(close).diff()
+    ret_s = ret.stack()
+
+    df_idx = df.set_index(["Date", "Code"])
+    amt = df_idx["Amount"].replace(0, np.nan)
+    df_idx["Amihud"] = ret_s.abs()
+    df_idx["Amihud"] = df_idx["Amihud"] / amt
+    df_idx["AmihudAvg"] = (
+        df_idx.groupby(level="Code", sort=False)["Amihud"]
+        .rolling(window=window, min_periods=min_periods)
+        .mean()
+        .reset_index(level=0, drop=True)
+    )
+    df = df_idx.reset_index()
+    df = df.drop(columns=["Amihud"])
+    return df
+
+
 def daily_rank_to_monthly(close: pd.DataFrame) -> pd.DataFrame:
     ret_d = np.log(close).diff()
     rank_d = ret_d.rank(axis=1, ascending=True, method="min")
     count_d = ret_d.notna().sum(axis=1)
     rank_norm_d = (rank_d.sub(1, axis=0)).div((count_d - 1).replace(0, np.nan), axis=0)
     rank_m = rank_norm_d.resample("ME").mean()
+    return rank_m
+
+
+def weekly_rank_to_monthly(close: pd.DataFrame, week_freq: str = "W-FRI") -> pd.DataFrame:
+    close_w = close.resample(week_freq).last()
+    ret_w = np.log(close_w).diff()
+    rank_w = ret_w.rank(axis=1, ascending=True, method="min")
+    count_w = ret_w.notna().sum(axis=1)
+    rank_norm_w = (rank_w.sub(1, axis=0)).div((count_w - 1).replace(0, np.nan), axis=0)
+    rank_m = rank_norm_w.resample("ME").mean()
     return rank_m
 
 
@@ -163,6 +216,7 @@ def build_weights(
     close: pd.DataFrame | None = None,
     pre_filter_metric: str = "Marcap",
     pre_top_pct_range: tuple[float, float] | None = None,
+    top_pct_range: tuple[float, float] | None = None,
     rp_window: int = 120,
     rp_min_periods: int = 60,
 ) -> pd.DataFrame:
@@ -209,7 +263,10 @@ def build_weights(
             continue
 
         scores = rm.loc[month_end, codes]
-        pick_codes = pick_top_by_mode(scores, pick_mode, top_n, top_pct)
+        if pick_mode == "PCT" and top_pct_range is not None:
+            pick_codes = pick_top_by_pct_range(scores, top_pct_range)
+        else:
+            pick_codes = pick_top_by_mode(scores, pick_mode, top_n, top_pct)
         if len(pick_codes) == 0:
             continue
 
@@ -217,6 +274,20 @@ def build_weights(
             w = 1.0 / len(pick_codes)
             for code in pick_codes:
                 picked_rows.append((dt, code, w))
+        elif weight_mode == "RANK":
+            ranks = scores.loc[pick_codes].rank(ascending=False, method="average")
+            n = len(ranks)
+            weights = (n - ranks + 1).astype(float)
+            weights = weights / weights.sum()
+            for code, w in weights.items():
+                picked_rows.append((dt, code, float(w)))
+        elif weight_mode == "SCORE":
+            sc = scores.loc[pick_codes].astype(float)
+            min_s = float(sc.min())
+            weights = sc - min_s + 1e-12
+            weights = weights / weights.sum()
+            for code, w in weights.items():
+                picked_rows.append((dt, code, float(w)))
         elif weight_mode == "RP":
             if close is None:
                 raise ValueError("close is required for RP weights")

@@ -14,7 +14,10 @@ from bt_core import (
     benchmark_equity_for_index,
     add_amount_avg,
     add_marcap_avg,
+    add_turnover_avg,
+    add_amihud_avg,
     daily_rank_to_monthly,
+    weekly_rank_to_monthly,
     build_weights,
     momentum_12_1_log,
     beat_ratio,
@@ -34,10 +37,12 @@ SCOPES_FOR_ALL = ["KOSPI", "KOSDAQ", "KOSDAQ GLOBAL"]
 RANK_WINDOW_LIST = [3, 6, 9, 12]
 PICK_MODE = "PCT"  # "N" or "PCT"
 TOP_N_LIST = [10, 20, 40, 50]
-TOP_PCT_LIST = [0.05, 0.1, 0.2, 0.3]
+TOP_PCT_LIST = []
+TOP_PCT_RANGE_LIST = [(0.05, 0.15), (0.05, 0.1), (0, 0.05), (0, 0.1), (0, 0.2)]  # e.g. [(0.1, 0.3), (0.3, 0.5)]
 
 # Momentum mode
-MOMENTUM_MODE = "RANK_DAILY"  # "RANK_DAILY" or "MOM_12_1_LOG"
+MOMENTUM_MODE = "RANK_DAILY"  # "RANK_DAILY" or "RANK_WEEKLY" or "MOM_12_1_LOG"
+WEEKLY_FREQ = "W-FRI"
 MOM_12M = 12
 MOM_SKIP_1M = 1
 
@@ -53,21 +58,25 @@ PRE_TOP_PCT_PAIRS = [(0, 0.2), (0.2, 0.4), (0.4, 0.6), (0.6, 0.8), (0.8, 1.0), (
 
 # Secondary pre-filter (AND/OR)
 PRE_FILTER_COMBINE = "AND"  # "AND", "OR", or "SINGLE"
-PRE_FILTER_METRIC_2 = "AmountAvg"  # secondary metric when combine != SINGLE
+PRE_FILTER_METRIC_2 = "TurnoverAvg"  # secondary metric when combine != SINGLE TurnoverAvg AmihudAvg
 PRE_FILTER_MODE_2 = "PCT"  # "N" or "PCT"
 PRE_TOP_N_2 = 100
-PRE_TOP_PCT_2 = 0.8
-PRE_TOP_PCT_RANGE_2 = (0.1, 0.9)  # e.g. (0.1, 0.3) when PRE_FILTER_MODE_2 == "PCT"
+PRE_TOP_PCT_2 = None
+PRE_TOP_PCT_RANGE_2 = (0.2, 0.8) # e.g. (0.1, 0.3) when PRE_FILTER_MODE_2 == "PCT"
 AMOUNT_AVG_WINDOW = 25 * 3
 AMOUNT_AVG_MIN_PERIODS = 1
 MARCAP_AVG_WINDOW = 25 * 3
 MARCAP_AVG_MIN_PERIODS = 1
+TURNOVER_AVG_WINDOW = 25 * 3
+TURNOVER_AVG_MIN_PERIODS = 1
+AMIHUD_AVG_WINDOW = 25 * 3
+AMIHUD_AVG_MIN_PERIODS = 1
 
 FEES = 0.00215
 INIT_CASH = 1.0
 
 # Weighting
-WEIGHT_MODE_LIST = ["EQUAL"]  # "EQUAL" or "RP"
+WEIGHT_MODE_LIST = ["RANK"]  # "EQUAL", "RANK", "SCORE", or "RP"
 RP_WINDOW = 120  # trading days for covariance
 RP_MIN_PERIODS = 60
 
@@ -99,6 +108,8 @@ if "Amount" in u.columns:
     u = add_amount_avg(u, AMOUNT_AVG_WINDOW, AMOUNT_AVG_MIN_PERIODS)
 if "Marcap" in u.columns:
     u = add_marcap_avg(u, MARCAP_AVG_WINDOW, MARCAP_AVG_MIN_PERIODS)
+if "Amount" in u.columns and "Marcap" in u.columns:
+    u = add_turnover_avg(u, TURNOVER_AVG_WINDOW, TURNOVER_AVG_MIN_PERIODS)
 
 u = u[u["Scope"].isin(SCOPES_FOR_ALL)].copy()
 if "Marcap" in u.columns:
@@ -132,6 +143,9 @@ if ALT_TICKERS:
         raise ValueError(f"ALT_TICKERS overlap with close columns: {overlap}")
     close = pd.concat([close, alt_px], axis=1)
 
+if "Amount" in u.columns:
+    u = add_amihud_avg(u, close, AMIHUD_AVG_WINDOW, AMIHUD_AVG_MIN_PERIODS)
+
 timing_series = None
 if TIMING_ENABLED:
     timing_series = build_timing_series(
@@ -148,6 +162,8 @@ if TIMING_ENABLED:
 
 if MOMENTUM_MODE == "RANK_DAILY":
     signal_m = daily_rank_to_monthly(close)
+elif MOMENTUM_MODE == "RANK_WEEKLY":
+    signal_m = weekly_rank_to_monthly(close, week_freq=WEEKLY_FREQ)
 elif MOMENTUM_MODE == "MOM_12_1_LOG":
     signal_m = momentum_12_1_log(close, m=MOM_12M, skip=MOM_SKIP_1M)
 else:
@@ -161,9 +177,15 @@ portfolios = {}
 if PICK_MODE == "N":
     pick_top_n_list = TOP_N_LIST
     pick_top_pct_list = [None]
+    pick_top_pct_range_list = [None]
 elif PICK_MODE == "PCT":
     pick_top_n_list = [None]
-    pick_top_pct_list = TOP_PCT_LIST
+    if TOP_PCT_RANGE_LIST:
+        pick_top_pct_list = [None]
+        pick_top_pct_range_list = TOP_PCT_RANGE_LIST
+    else:
+        pick_top_pct_list = TOP_PCT_LIST
+        pick_top_pct_range_list = [None]
 else:
     raise ValueError(f"Unknown PICK_MODE: {PICK_MODE}")
 
@@ -195,22 +217,24 @@ for weight_mode in WEIGHT_MODE_LIST:
             rm = signal_m
         for top_n in pick_top_n_list:
             for top_pct in pick_top_pct_list:
-                for pre_top_n in pre_top_n_list:
-                    for pre_top_pct in pre_top_pct_list:
-                        for pre_top_n_range in pre_top_n_range_list:
-                            w_m = build_weights(
-                                u, rm, rebal_dates,
-                                rank_window, PICK_MODE, top_n or 0, top_pct or 0.0,
-                                PRE_FILTER_MODE, pre_top_n or 0, pre_top_pct or 0.0,
-                                weight_mode,
-                                pre_combine=PRE_FILTER_COMBINE,
-                                pre_metric_2=PRE_FILTER_METRIC_2,
-                                pre_mode_2=PRE_FILTER_MODE_2,
-                                pre_top_n_2=PRE_TOP_N_2,
-                                pre_top_pct_2=PRE_TOP_PCT_2,
-                                pre_top_pct_range_2=PRE_TOP_PCT_RANGE_2,
-                                pre_top_n_range=pre_top_n_range,
-                            )
+                for top_pct_range in pick_top_pct_range_list:
+                    for pre_top_n in pre_top_n_list:
+                        for pre_top_pct in pre_top_pct_list:
+                            for pre_top_n_range in pre_top_n_range_list:
+                                w_m = build_weights(
+                                    u, rm, rebal_dates,
+                                    rank_window, PICK_MODE, top_n or 0, top_pct or 0.0,
+                                    PRE_FILTER_MODE, pre_top_n or 0, pre_top_pct or 0.0,
+                                    weight_mode,
+                                    pre_combine=PRE_FILTER_COMBINE,
+                                    pre_metric_2=PRE_FILTER_METRIC_2,
+                                    pre_mode_2=PRE_FILTER_MODE_2,
+                                    pre_top_n_2=PRE_TOP_N_2,
+                                    pre_top_pct_2=PRE_TOP_PCT_2,
+                                    pre_top_pct_range_2=PRE_TOP_PCT_RANGE_2,
+                                    pre_top_n_range=pre_top_n_range,
+                                    top_pct_range=top_pct_range,
+                                )
                             if w_m.empty:
                                 continue
                             if TIMING_ENABLED:
@@ -249,6 +273,7 @@ for weight_mode in WEIGHT_MODE_LIST:
                                 PICK_MODE,
                                 top_n,
                                 top_pct,
+                                top_pct_range,
                                 PRE_FILTER_MODE,
                                 record_pre_top_n,
                                 pre_top_pct,
@@ -260,6 +285,7 @@ for weight_mode in WEIGHT_MODE_LIST:
                                 "pick_mode": PICK_MODE,
                                 "top_n": top_n,
                                 "top_pct": top_pct,
+                                "top_pct_range": top_pct_range,
                                 "pre_mode": PRE_FILTER_MODE,
                                 "pre_top_n": record_pre_top_n,
                                 "pre_top_pct": pre_top_pct,
@@ -277,7 +303,7 @@ for weight_mode in WEIGHT_MODE_LIST:
 res = pd.DataFrame(
     results,
     columns=[
-        "weight_mode", "rank_window", "pick_mode", "top_n", "top_pct",
+        "weight_mode", "rank_window", "pick_mode", "top_n", "top_pct", "top_pct_range",
         "pre_mode", "pre_top_n", "pre_top_pct",
         "total_return", "sharpe", "cagr", "calmar", "max_drawdown", "rolling_12m_return_std",
         "hold_avg", "hold_min", "hold_max",
@@ -308,6 +334,7 @@ if common_start is not None:
     for i, row in res.iterrows():
         key = (
             row["weight_mode"], row["rank_window"], row["pick_mode"], row["top_n"], row["top_pct"],
+            row["top_pct_range"],
             row["pre_mode"], row["pre_top_n"], row["pre_top_pct"],
         )
         pf = portfolios[key]
@@ -341,6 +368,7 @@ all_eq = []
 for _, row in top5.iterrows():
     key = (
         row["weight_mode"], row["rank_window"], row["pick_mode"], row["top_n"], row["top_pct"],
+        row["top_pct_range"],
         row["pre_mode"], row["pre_top_n"], row["pre_top_pct"],
     )
     pf = portfolios[key]
@@ -379,6 +407,7 @@ if all_eq:
         "pick_mode": "",
         "top_n": np.nan,
         "top_pct": np.nan,
+        "top_pct_range": np.nan,
         "pre_mode": "",
         "pre_top_n": np.nan,
         "pre_top_pct": np.nan,
