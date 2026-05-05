@@ -38,7 +38,7 @@ SCOPES_FOR_ALL = ["KOSPI"]
 RANK_WINDOW_LIST = [3, 6, 9, 12]
 RANK_SKIP_M = 2  # 최근 N개월 제외 (rank_window 합에서 빼기)
 PICK_MODE = "N"  # "N" or "PCT" (N: top_n, PCT: top_pct; tuple = range)
-TOP_N_LIST = [10, (3,13)]
+TOP_N_LIST = [10, (3,12)]
 TOP_PCT_LIST = [0.01, 0.02, 0.03, 0.04, 0.05, 0.1]
 
 # Momentum mode

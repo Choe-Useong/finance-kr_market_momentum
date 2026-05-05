@@ -14,21 +14,44 @@ from marcap import marcap_data
 os.chdir(ROOT)
 
 START = "2014-01-01"
-END = "2026-02-10"  # None -> use full available range
+END = None  # None -> latest Date in marcap/data parquet files
+MARCAP_DATA_DIR = ROOT / "marcap" / "data"
 
 # Screening configuration
 METRIC = "Marcap"  # "Marcap" or "Amount"
 AMOUNT_WINDOW = 25 * 3  # rolling window (rows) for Amount
 AMOUNT_MIN_PERIODS = 1
-PICK_MODE = "PCT"  # "N" or "PCT"
-TOP_N = 400
+PICK_MODE = "N"  # "N" or "PCT"
+TOP_N = 600
 TOP_PCT_RANGE = (0.0, 0.8)  # keep ranks in (low, high] percent; e.g. top 10% = (0.0, 0.10)
 
 # Scope configuration
-SCOPES = ["KOSPI"] # SCOPES = ["KOSPI", "KOSDAQ", "KOSDAQ GLOBAL"]
-SCOPE_MODE = "BY_SCOPE"  # "BY_SCOPE" or "ALL"
+SCOPES = ["KOSPI", "KOSDAQ", "KOSDAQ GLOBAL"] # SCOPES = ["KOSPI", "KOSDAQ", "KOSDAQ GLOBAL"]
+SCOPE_MODE = "ALL"  # "BY_SCOPE" or "ALL"
 
 OUT_UNIVERSE = str(BASE / "build_universe.parquet")
+
+
+def latest_marcap_date(data_dir: Path) -> str:
+    files = sorted(data_dir.glob("marcap-*.parquet"))
+    if not files:
+        raise FileNotFoundError(f"No marcap parquet files in {data_dir}")
+
+    latest = None
+    for path in files:
+        try:
+            d = pd.read_parquet(path, columns=["Date"])
+        except Exception:
+            continue
+        if d.empty:
+            continue
+        mx = pd.to_datetime(d["Date"]).max()
+        if latest is None or mx > latest:
+            latest = mx
+
+    if latest is None:
+        raise ValueError(f"No Date values found in {data_dir}")
+    return latest.strftime("%Y-%m-%d")
 
 
 def add_amount_avg(df: pd.DataFrame, window: int, min_periods: int) -> pd.DataFrame:
@@ -64,7 +87,9 @@ def pick_top(df: pd.DataFrame, metric: str, pick_mode: str, top_n: int, pct_rang
     raise ValueError(f"Unknown PICK_MODE: {pick_mode}")
 
 
-df = marcap_data(START, END)
+end_date = END if END is not None else latest_marcap_date(MARCAP_DATA_DIR)
+print("marcap range:", START, "->", end_date)
+df = marcap_data(START, end_date)
 df["Code"] = df["Code"].astype(str).str.zfill(6)
 df = df[df["Marcap"].notna()].copy()
 
